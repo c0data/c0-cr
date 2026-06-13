@@ -11,6 +11,7 @@ license: MIT
 dependencies:
   jargon:
     github: trans/jargon
+    version: ~> 0.18.0
 
 targets:
   c0fmt:
