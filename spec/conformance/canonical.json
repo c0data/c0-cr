@@ -1,0 +1,53 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "name": "minimal-escape",
+      "desc": "Escaped RS in a value: necessary, canonical",
+      "bytes": "1e61101e62",
+      "wellformed": true, "canonical": true
+    },
+    {
+      "name": "plain-table",
+      "desc": "Ordinary table, nothing escaped, no framing",
+      "bytes": "1d7573657273016e616d651f616d6f756e741e416c6963651f3130301e426f621f323030",
+      "wellformed": true, "canonical": true
+    },
+    {
+      "name": "escaped-unassigned-byte",
+      "desc": "Escaped unassigned control byte: necessary (binary data), canonical",
+      "bytes": "1e1006",
+      "wellformed": true, "canonical": true
+    },
+    {
+      "name": "gratuitous-escape",
+      "desc": "DLE before a byte >= 0x20 is gratuitous: decodes fine, not canonical",
+      "bytes": "1e1041",
+      "wellformed": true, "canonical": false
+    },
+    {
+      "name": "trailing-eot",
+      "desc": "EOT is transport framing: not part of a canonical document unit",
+      "bytes": "1d671e6104",
+      "wellformed": true, "canonical": false
+    },
+    {
+      "name": "etb-framing",
+      "desc": "ETB is stream framing: not part of a canonical document unit",
+      "bytes": "1e6117",
+      "wellformed": true, "canonical": false
+    },
+    {
+      "name": "unassigned-code",
+      "desc": "Bare unassigned control byte: neither well-formed nor canonical",
+      "bytes": "1e06",
+      "wellformed": false, "canonical": false
+    },
+    {
+      "name": "dangling-dle",
+      "desc": "DLE at end of input: neither well-formed nor canonical",
+      "bytes": "1e6110",
+      "wellformed": false, "canonical": false
+    }
+  ]
+}

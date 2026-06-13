@@ -17,6 +17,9 @@ with minimal tooling.
 - Only assign codes that genuinely earn their place — leave the rest reserved.
 - Support both self-describing (schemaless) and positional (schema-based) usage.
 - One control code vocabulary, multiple data shapes (table, document, diff, etc.).
+- Structure is determinable with **bounded lookbehind**. Chunked scanning,
+  SIMD acceleration, and mid-buffer resynchronization depend on this; no
+  feature may require unbounded context to classify a byte.
 
 
 ## Assigned Control Codes
@@ -29,6 +32,7 @@ with minimal tooling.
 | 0x04 | 0x04 | EOT  | End of document / message                     |
 | 0x05 | 0x05 | ENQ  | Reference (enquiry — look up named data)      |
 | 0x10 | 0x10 | DLE  | Escape (next byte is literal, not control)    |
+| 0x17 | 0x17 | ETB  | Commit marker (stream mode block terminator)  |
 | 0x1A | 0x1A | SUB  | Substitution (old → new, used in C0-DIFF)     |
 | 0x1C | 0x1C | FS   | File / Database separator                     |
 | 0x1D | 0x1D | GS   | Group / Table / Section separator             |
@@ -243,12 +247,181 @@ DLE (0x10) escapes the next byte as literal data, not a control code.
 
 DLE was chosen over ESC (0x1B) to avoid conflict with ANSI escape sequences.
 
+DLE is the format's one concession against pure statelessness: classifying
+a control byte mid-buffer requires checking for a preceding escape, and a
+run of DLEs requires counting its parity. That lookbehind is **bounded**
+by the length of the escape run — the minimum possible price for an
+in-band escape, and the price is what buys byte-transparent values
+(including literal LF, HT, and raw binary if a consumer wants it). This
+is the scan invariant the design principles protect; it is why the
+length-prefixed binary idea was rejected (see Speculations).
+
+
+## Canonical Form (Content Addressing)
+
+The compact form is canonical in the strong sense: **the same logical
+value encodes to exactly one byte sequence**, reproducible by any
+conforming encoder in any language. Two conforming encoders given the
+same data MUST emit identical bytes, so the bytes may be hashed and
+equal hashes mean equal values. The pretty form is presentation, never
+hashed. The rules:
+
+### Minimal Escaping
+
+A canonical encoder emits DLE if and only if the next byte would
+otherwise be read as a control code: **every value byte below 0x20 is
+escaped; no byte at or above 0x20 is ever escaped.** Gratuitous escapes
+(`[DLE]A` for `A`) are non-canonical. The escape set is frozen at "all
+bytes below 0x20" — not "currently assigned codes" — so future code
+assignments can never change what is minimal and silently break
+existing hashes.
+
+### Fields Are Counted by Separators
+
+N separators delimit N+1 units: `Alice[US]` is two fields (the second
+empty) and is a different value from `Alice` (one field). An empty
+record (RS immediately followed by a structural code) is one empty
+field. There is no "absent" field — only empty — and arity is always
+significant. Because decoding is exact, no encoder restriction is
+needed: every distinct field sequence already has exactly one encoding.
+
+### Values Are Byte Sequences
+
+Field values are byte-transparent: conventionally UTF-8 text, but any
+bytes are legal (control bytes escaped per the rule above). A canonical
+encoder performs **no Unicode normalization** and no other
+transformation of value bytes. "Same logical value" means "same bytes,
+field by field."
+
+### Names Are Identifiers
+
+Labels — file and group names — and SOH header names are identifiers,
+not values: they MUST NOT contain bytes below 0x20, escaped or
+otherwise. (Escaped control bytes in names would buy little and
+complicate every name scan; identifiers stay plain.)
+
+### Order Is Significant
+
+C0 defines **no unordered constructs**. Records appear in order; fields
+are positional; SOH header columns are positional. Conforming codecs
+MUST preserve order exactly and MUST NOT reorder. Canonicalizing
+logically unordered data — a map's keys, a set's members, a directory's
+entries — into a definite order is the **producer's responsibility**,
+above the format (compare git tree objects or RFC 8785 for JSON: the
+sort rule belongs to the application's data model, not the wire
+format). Where no domain rule exists, the recommended convention is to
+sort records byte-lexicographically by first field.
+
+### Framing Is Outside the Hash
+
+ETB commit markers and their payloads, and EOT, are framing — never
+part of any canonical unit's bytes.
+
+### Canonical Units
+
+Hashing requires agreement on the byte span. Three granularities:
+
+- **Record** — the content bytes after its RS, up to the next
+  structural code or framing byte. Escapes and STX/ETX nesting
+  included, the RS itself excluded.
+- **Group** — from its GS through its records (name and SOH header
+  included), up to the next top-level GS, FS, or EOT.
+- **Document** — the buffer from FS (or start of content) to the last
+  content byte. A canonical document contains no framing bytes at all:
+  no ETB (that is stream framing) and no trailing EOT (that is
+  transport framing).
+
+For stream logs, the hashed span of a **block** is defined in Stream
+Mode and equals the framing block exactly.
+
+The contract is only credible across implementations with shared golden
+fixtures — the language-agnostic conformance suite is the normative
+companion to this section.
+
 
 ## Document Termination (EOT)
 
 EOT (0x04) marks the end of a complete C0DATA document or message. Optional
 in file-at-rest scenarios (EOF is implicit). Useful for streaming, where
 multiple documents may be sent over a single connection.
+
+
+## Stream Mode (ETB Commits)
+
+C0DATA records are start-delimited: RS begins a record, and nothing marks
+its end except the next control code or end of input. For a document at
+rest that is fine. For an append-only log — an event stream, a write-ahead
+log, a journal — it is not: a process can crash mid-append, and with
+start-delimiters alone a truncated final record is indistinguishable from a
+complete one. EOT does not help; a crashed append never reaches it.
+
+Stream mode closes this gap with **ETB (0x17)** — "End of Transmission
+Block" — as an explicit commit marker.
+
+### The Commit Rule
+
+ETB commits the **block** of bytes appended since the previous ETB (or the
+start of the stream). A block is typically one record, but may be several
+— committing N records with a single trailing ETB makes the batch atomic:
+either the whole batch replays, or none of it does.
+
+    [RS]create[US]a1b2c3[US]1718208000[ETB]
+    [RS]name[US]draft-2[US]1718208042[ETB]
+    [RS]tag[US]alpha[US]17182080        ← torn tail: no ETB, skipped
+
+In stream mode:
+
+- A block is **complete** if and only if it is terminated by ETB.
+- **Readers** MUST treat a trailing block with no terminating ETB as torn
+  and skip it. It is residue of an interrupted append, not data.
+- **Writers** MUST verify the stream ends at an ETB before appending — by
+  truncating an uncommitted tail or by appending from the last ETB
+  position. Appending after an unrepaired tail is non-conforming, and not
+  merely untidy: a tail torn between a DLE and its escaped byte ends in a
+  bare DLE, which would escape the RS of the next blind append and fuse
+  the torn fragment with the new record into one well-formed, committed —
+  and corrupt — block.
+- A block and its ETB SHOULD be issued as a single append, so that ETB
+  never lands without its block.
+
+The commit rule applies to every appended unit, including an SOH header —
+a header write can tear exactly like a record write.
+
+### ETB Payload
+
+ETB may be followed by an **integrity payload**, terminated by the next
+control code. An empty payload means the ETB is framing-only. Payload
+semantics (e.g. a checkpoint hash of the preceding block — see
+Speculations) are not yet specified, but the grammar is fixed now so that
+framing-only readers remain forward-compatible: skip to the next control
+code after ETB.
+
+When payload semantics are specified, the hashed **span** is the block
+exactly as framing defines it: every byte after the previous ETB's
+payload (or from the start of the stream) up to but not including this
+ETB — leading RS and any GS/SOH preamble bytes included, the ETB marker
+and payload excluded. Defining the span to the byte is part of the
+canonical-form contract (see Canonical Form).
+
+### Relationship to the Rest of C0DATA
+
+ETB is framing, not data. It and its payload are not part of any record's
+bytes — a record's content is identical whether or not it travels with a
+commit marker. (This matters when records are hashed; see Open Questions
+on canonical form.)
+
+Outside stream mode, parsers MUST tolerate a framing-only ETB as a no-op
+at any record boundary. This keeps a stream-mode log readable by ordinary
+C0DATA tooling — pretty-printing, validation, export — without a special
+mode. In pretty form, ETB renders as ␗ (U+2417).
+
+### What Stream Mode Does Not Provide
+
+ETB commits give **crash consistency**: an interrupted append is always
+detectable and recoverable, never silently folded into state. They do not
+provide **durability** (when bytes reach disk is the application's fsync
+discipline) or **integrity** (bit rot or zero-fill inside a committed
+block goes undetected until checkpoint-hash payloads are specified).
 
 
 ## C0-DIFF (Atomic Multi-File Edits)
@@ -323,18 +496,16 @@ expresses multiple common data shapes:
 | Nested     | STX/ETX, any inner codes   | JSON objects         |
 | Reference  | ENQ, STX/ETX for paths     | foreign keys, links  |
 | Diff       | FS, GS, US, SUB, DLE       | unified diff, patches|
-| Stream     | EOT between documents      | NDJSON, SSE          |
+| Stream     | RS, US, ETB; EOT between docs | NDJSON, SSE, WAL  |
 
 
 ## Open Questions
 
-- **Type encoding:** Are values always text, or can binary-encoded values
-  be supported?
 - **Unassigned codes:** Should a parser reject, ignore, or pass-through
   unassigned C0 bytes in compact form?
 - **C0-DIFF integration:** SUB is used in diff mode but not in data mode.
   Any conflicts if both modes coexist in one document?
-- **Reserved codes:** CAN, ETB, ESC, and others may find roles as the spec
+- **Reserved codes:** CAN, ESC, and others may find roles as the spec
   evolves.
 
 
@@ -345,32 +516,70 @@ reserved codes might be used if these features are needed in the future.
 
 ### Checkpoint Hashes (Integrity Verification)
 
-**ETB (0x17)** — "End Transmission Block" — could mark a block boundary
-followed by a hash. The receiver verifies integrity at each checkpoint,
-not just at the end. Useful for large documents or unreliable transports.
+ETB (0x17) is now assigned as the stream-mode commit marker, and its
+payload grammar is reserved (see Stream Mode). The speculation that
+remains: the payload could carry a **hash of the preceding block**, so a
+receiver verifies integrity at each checkpoint, not just truncation at
+the tail. Useful for large documents or unreliable transports.
 
     [GS]users
     [SOH]name[US]amount
     [RS]Alice[US]1502.30
     [RS]Bob[US]340.00
-    [ETB]<hash bytes>
+    [ETB]<hash>
+
+Design constraints already settled with a real consumer (transfs):
+
+- **Integrity, not security.** Checkpoint hashes detect corruption and
+  truncation; tamper-evidence belongs to the layers above (content
+  addressing, signatures). A fast non-cryptographic hash would suffice
+  functionally.
+- **Algorithm-tagged.** The payload should carry a small algorithm tag
+  (algo-id ‖ length ‖ digest, multihash-style) rather than pinning one
+  hash family, so cheap integrity-only consumers and SHA-256-everywhere
+  consumers both fit, and digest length stays future-proof.
+- **Blocks are independent — no hash chaining.** A consumer that wants a
+  tamper-evident chain includes the previous hash as a field in its own
+  records, at its own semantic layer, invisible to C0.
+- **Span is the framing block** (see Stream Mode), defined to the byte
+  together with the canonical-form contract.
+
+The payload encoding is **text** (hex digest, with the algorithm tag as
+a short text prefix). Raw digest bytes would violate "payload terminated
+by the next control code" and were rejected along with SO/SI binary
+fields (below). Text costs 2× on the digest but keeps the framing
+invariant and forward compatibility for framing-only readers.
 
 **CAN (0x18)** — "Cancel" — could signal that the preceding data is invalid
 and should be discarded. A natural response when a checkpoint hash fails.
 
-### Binary Data (SO/SI)
+### Binary Data (SO/SI) — REJECTED
 
-Binary blobs can contain any byte, including control codes. DLE-escaping
-works but could double the size in the worst case.
-
-**SO (0x0E) / SI (0x0F)** — "Shift Out / Shift In" — originally switched
-between character sets. Modernized: shift into binary mode with a length
-prefix, then shift back.
+The idea: **SO (0x0E) / SI (0x0F)** — "Shift Out / Shift In" — shift into
+binary mode with a length prefix, read exactly N raw bytes with no
+control-code scanning, shift back:
 
     [RS]image-001[US][SO]<4-byte length><raw bytes>[SI]
 
-Inside SO...SI, the parser reads exactly N bytes without scanning for
-control codes. No escaping overhead.
+**Rejected** because it breaks the bounded-lookbehind invariant (see
+Design Principles): a byte inside an SO region is indistinguishable from
+structure without having parsed from the beginning, which forecloses
+chunked scanning, SIMD, and resynchronization — and a single corrupted
+length byte desyncs everything after it. C0 is not a blob format.
+
+Binary values that fit in fields ride as text (hex/base64 — a 32-byte
+digest is 64 hex bytes) or as DLE-escaped raw bytes (~12.5% average
+inflation, in-spec today, scan-safe). Large blobs belong out-of-line,
+addressed by name or hash — content-addressed stores do exactly this.
+
+The one shape that could ever work without breaking the invariant: a
+**blob appendix after EOT**. The scanner stops at EOT, so raw bytes
+beyond it are never scanned; a regular group inside the document could
+declare (name, offset, length) entries pointing into the appendix. If a
+real consumer with in-line blob needs ever appears, that is the design
+to explore — likely as a separate C0BLOB spec, not core C0. (YAML
+reached the same conclusion from a different direction: its `!!binary`
+type is base64 text, never raw bytes.)
 
 ### Type Discrimination (Numbers vs Text)
 

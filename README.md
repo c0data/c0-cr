@@ -43,6 +43,7 @@ is just for readability.
 | 0x04 | EOT | End of document |
 | 0x05 | ENQ | Reference (look up named data) |
 | 0x10 | DLE | Escape (next byte is literal) |
+| 0x17 | ETB | Commit marker (stream mode) |
 | 0x1A | SUB | Substitution (C0DIFF) |
 | 0x1C | FS  | File / Database separator |
 | 0x1D | GS  | Group / Table / Section separator |
@@ -100,6 +101,19 @@ C0DIFF uses anchored patterns for safe search-and-replace:
 ```
 
 Means: in `foo.txt`, find `Hello world!`, replace `world` with `universe`.
+
+### Stream (Append-Only Logs)
+
+For event logs and write-ahead logs, ETB (␗) commits each appended block.
+A crashed append never writes its commit marker, so replay skips the torn
+tail instead of folding corrupt state:
+
+```
+␞create␟a1b2␗
+␞name␟draft-2␗
+```
+
+A block may hold several records under one commit — an atomic batch.
 
 ### Whitespace and Quoting
 
@@ -288,6 +302,25 @@ files = {"src/app.cr" => source_code}
 result = C0::Diff.apply(diff, files)
 ```
 
+### Stream Logs
+
+```crystal
+C0::Stream::Writer.open("claims.c0") do |log|
+  log.record("create", nonce, ts)
+  log.batch do |b|              # atomic multi-record commit
+    b.record("name", label, ts)
+    b.record("tag", tag, ts)
+  end
+end
+
+reader = C0::Stream::Reader.read("claims.c0")
+reader.torn?                          # uncommitted tail present?
+reader.each_record { |rec| ... }      # committed records only
+```
+
+`Writer.open` repairs a torn tail before appending. `c0fmt validate -s`
+checks a log from the command line.
+
 ## Two Forms
 
 C0DATA has two representations:
@@ -296,6 +329,11 @@ C0DATA has two representations:
   No whitespace is ignored.
 - **Pretty** -- human-readable. Uses Unicode Control Pictures (U+2400 block)
   for visible glyphs. Newlines and indentation are ignored by the parser.
+
+Compact form is canonical in the strong sense: the same logical value
+encodes to exactly one byte sequence, so compact bytes can be hashed for
+content addressing (see DESIGN.md "Canonical Form"). `C0.canonical?(buf)`
+checks a buffer; conformance vectors live in `spec/conformance/`.
 
 The `c0fmt` command-line tool converts between them and more.
 

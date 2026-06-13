@@ -26,25 +26,25 @@ module C0
     # Write a file/database scope.
     def file(name : String, & : ->) : Nil
       @io.write_byte(FS)
-      @io << name
+      write_name(name)
       yield
     end
 
     # Write a file/database scope (no block).
     def file(name : String) : Nil
       @io.write_byte(FS)
-      @io << name
+      write_name(name)
     end
 
     # Write a group/table scope with optional headers.
     def group(name : String, headers : Indexable(String)? = nil, & : ->) : Nil
       @io.write_byte(GS)
-      @io << name
+      write_name(name)
       if h = headers
         @io.write_byte(SOH)
         h.each_with_index do |field, i|
           @io.write_byte(US) if i > 0
-          @io << field
+          write_name(field)
         end
       end
       yield
@@ -53,13 +53,23 @@ module C0
     # Write a group/table scope (no block).
     def group(name : String, headers : Indexable(String)? = nil) : Nil
       @io.write_byte(GS)
-      @io << name
+      write_name(name)
       if h = headers
         @io.write_byte(SOH)
         h.each_with_index do |field, i|
           @io.write_byte(US) if i > 0
-          @io << field
+          write_name(field)
         end
+      end
+    end
+
+    # Write a standalone SOH header (e.g. for stream mode, where the
+    # header is appended and committed separately from the group).
+    def header(names : Indexable(String)) : Nil
+      @io.write_byte(SOH)
+      names.each_with_index do |field, i|
+        @io.write_byte(US) if i > 0
+        write_name(field)
       end
     end
 
@@ -84,6 +94,19 @@ module C0
     # Write an EOT marker.
     def eot : Nil
       @io.write_byte(EOT)
+    end
+
+    # Write an ETB commit marker (stream mode), with an optional
+    # integrity payload. The payload may not contain control bytes —
+    # it is terminated by the next control code on read.
+    def etb(payload : String? = nil) : Nil
+      @io.write_byte(ETB)
+      if p = payload
+        p.each_byte do |byte|
+          raise ArgumentError.new("ETB payload may not contain control bytes") if byte < 0x20_u8
+          @io.write_byte(byte)
+        end
+      end
     end
 
     # Write a nested sub-structure.
@@ -120,14 +143,14 @@ module C0
     # Write GS×N for document-mode depth.
     def section(name : String, depth : Int32 = 1, & : ->) : Nil
       depth.times { @io.write_byte(GS) }
-      @io << name
+      write_name(name)
       yield
     end
 
     # Write GS×N for document-mode depth (no block).
     def section(name : String, depth : Int32 = 1) : Nil
       depth.times { @io.write_byte(GS) }
-      @io << name
+      write_name(name)
     end
 
     # Write a content block (RS + text) for document mode.
@@ -144,6 +167,18 @@ module C0
 
     def to_slice : Bytes
       @io.to_slice
+    end
+
+    # Writes a name (label or header). Names are identifiers, not
+    # values — control bytes are illegal in them (see DESIGN.md
+    # "Canonical Form").
+    private def write_name(str : String) : Nil
+      str.each_byte do |byte|
+        if byte < 0x20_u8
+          raise ArgumentError.new("Names may not contain control bytes (got 0x#{byte.to_s(16).rjust(2, '0')})")
+        end
+        @io.write_byte(byte)
+      end
     end
 
     # Writes a string, DLE-escaping any control codes.

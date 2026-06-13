@@ -1,0 +1,116 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "name": "simple-table",
+      "desc": "Group with SOH header and two records",
+      "bytes": "1d7573657273016e616d651f616d6f756e741e416c6963651f3130301e426f621f323030",
+      "file": null,
+      "groups": [
+        {"name": "users", "headers": ["name", "amount"],
+         "records": [["Alice", "100"], ["Bob", "200"]]}
+      ]
+    },
+    {
+      "name": "trailing-us-empty-field",
+      "desc": "N separators = N+1 fields: trailing US yields a final empty field",
+      "bytes": "1e416c6963651f",
+      "file": null,
+      "groups": [{"name": "", "headers": null, "records": [["Alice", ""]]}]
+    },
+    {
+      "name": "leading-us-empty-field",
+      "desc": "Leading US yields an initial empty field",
+      "bytes": "1e1f61",
+      "file": null,
+      "groups": [{"name": "", "headers": null, "records": [["", "a"]]}]
+    },
+    {
+      "name": "empty-middle-field",
+      "desc": "Consecutive US yields an empty middle field",
+      "bytes": "1e611f1f63",
+      "file": null,
+      "groups": [{"name": "", "headers": null, "records": [["a", "", "c"]]}]
+    },
+    {
+      "name": "empty-record-at-end",
+      "desc": "Trailing RS is an empty record with one empty field",
+      "bytes": "1e611e",
+      "file": null,
+      "groups": [{"name": "", "headers": null, "records": [["a"], [""]]}]
+    },
+    {
+      "name": "empty-record-between",
+      "desc": "RS RS is an empty record before the next",
+      "bytes": "1e1e62",
+      "file": null,
+      "groups": [{"name": "", "headers": null, "records": [[""], ["b"]]}]
+    },
+    {
+      "name": "escaped-us-in-value",
+      "desc": "DLE-escaped US is data, not a separator",
+      "bytes": "1e61101f621f63",
+      "file": null,
+      "groups": [{"name": "", "headers": null, "records": [["a\u001fb", "c"]]}]
+    },
+    {
+      "name": "escaped-dle",
+      "desc": "DLE DLE decodes to a literal DLE byte",
+      "bytes": "1e1010",
+      "file": null,
+      "groups": [{"name": "", "headers": null, "records": [["\u0010"]]}]
+    },
+    {
+      "name": "escaped-binary-bytes",
+      "desc": "Escaped unassigned control bytes carry raw binary (byte-transparent values)",
+      "bytes": "1e10001006101b",
+      "file": null,
+      "groups": [{"name": "", "headers": null, "records": [[{"hex": "00061b"}]]}]
+    },
+    {
+      "name": "nested-scope-us",
+      "desc": "US inside STX/ETX is not a field boundary; the scope is part of the field",
+      "bytes": "1e02781f79031f7a",
+      "file": null,
+      "groups": [{"name": "", "headers": null, "records": [[{"hex": "02781f7903"}, "z"]]}]
+    },
+    {
+      "name": "bare-records",
+      "desc": "Records with no FS/GS preamble (e.g. a stream log body)",
+      "bytes": "1e611f621e631f64",
+      "file": null,
+      "groups": [{"name": "", "headers": null, "records": [["a", "b"], ["c", "d"]]}]
+    },
+    {
+      "name": "multi-group-document",
+      "desc": "FS file name with two GS groups",
+      "bytes": "1c64621d67311e611d67321e62",
+      "file": "db",
+      "groups": [
+        {"name": "g1", "headers": null, "records": [["a"]]},
+        {"name": "g2", "headers": null, "records": [["b"]]}
+      ]
+    },
+    {
+      "name": "utf8-value",
+      "desc": "Multibyte UTF-8 passes through untouched (no normalization)",
+      "bytes": "1e68c3a96c6c6f",
+      "file": null,
+      "groups": [{"name": "", "headers": null, "records": [["héllo"]]}]
+    },
+    {
+      "name": "etb-tolerated",
+      "desc": "ETB commit markers are framing: parsed structure is identical with or without them",
+      "bytes": "1d67170168171e6117",
+      "file": null,
+      "groups": [{"name": "g", "headers": ["h"], "records": [["a"]]}]
+    },
+    {
+      "name": "header-no-records",
+      "desc": "Group with header and zero records",
+      "bytes": "1d6701611f62",
+      "file": null,
+      "groups": [{"name": "g", "headers": ["a", "b"], "records": []}]
+    }
+  ]
+}

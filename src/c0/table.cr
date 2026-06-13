@@ -80,6 +80,14 @@ module C0
         @name_end = pos
       end
 
+      # Skip ETB commit markers and their payloads (stream mode framing)
+      while pos < len && ptr[pos] == ETB
+        pos += 1
+        while pos < len && ptr[pos] >= 0x20_u8
+          pos += 1
+        end
+      end
+
       # Read SOH header if present
       if pos < len && ptr[pos] == SOH
         pos += 1
@@ -118,7 +126,7 @@ module C0
           # Scan to end of record (skip over STX/ETX nested scopes)
           while pos < len
             b = ptr[pos]
-            break if b == RS || b == GS || b == FS || b == EOT || b == ETX
+            break if b == RS || b == GS || b == FS || b == EOT || b == ETX || b == ETB
             if b == DLE
               pos += 2 # skip escaped byte
             elsif b == STX
@@ -232,6 +240,17 @@ module C0
     # All fields as slices.
     def fields : Array(Bytes)
       (0...field_count).map { |i| field(i) }
+    end
+
+    # Logical bytes of field n: the raw slice with DLE escapes decoded.
+    # Zero-copy when the field contains no escapes.
+    def value(n : Int32) : Bytes
+      C0.unescape(field(n))
+    end
+
+    # All logical field values.
+    def values : Array(Bytes)
+      (0...field_count).map { |i| value(i) }
     end
 
     # Raw bytes of the entire record.

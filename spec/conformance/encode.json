@@ -1,0 +1,63 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "name": "simple-table",
+      "desc": "Header and records encode in order, nothing escaped",
+      "build": {"file": null, "groups": [
+        {"name": "users", "headers": ["name", "amount"],
+         "records": [["Alice", "100"], ["Bob", "200"]]}]},
+      "canonical": "1d7573657273016e616d651f616d6f756e741e416c6963651f3130301e426f621f323030"
+    },
+    {
+      "name": "escape-rs-in-value",
+      "desc": "A value byte 0x1E must be DLE-escaped",
+      "build": {"file": null, "groups": [
+        {"name": "g", "headers": null, "records": [["a\u001eb"]]}]},
+      "canonical": "1d671e61101e62"
+    },
+    {
+      "name": "escape-newline-tab",
+      "desc": "LF and HT are control bytes: escaped in values",
+      "build": {"file": null, "groups": [
+        {"name": "g", "headers": null, "records": [["l1\nl2\tx"]]}]},
+      "canonical": "1d671e6c31100a6c32100978"
+    },
+    {
+      "name": "trailing-empty-field",
+      "desc": "A trailing empty field encodes as a trailing US",
+      "build": {"file": null, "groups": [
+        {"name": "g", "headers": null, "records": [["a", ""]]}]},
+      "canonical": "1d671e611f"
+    },
+    {
+      "name": "empty-record",
+      "desc": "A record of one empty field encodes as a bare RS",
+      "build": {"file": null, "groups": [
+        {"name": "g", "headers": null, "records": [[""]]}]},
+      "canonical": "1d671e"
+    },
+    {
+      "name": "binary-run",
+      "desc": "Every value byte < 0x20 is escaped, including unassigned codes",
+      "build": {"file": null, "groups": [
+        {"name": "g", "headers": null, "records": [[{"hex": "0001021f"}]]}]},
+      "canonical": "1d671e100010011002101f"
+    },
+    {
+      "name": "high-bytes-unescaped",
+      "desc": "No byte >= 0x20 is ever escaped (UTF-8 passes through)",
+      "build": {"file": null, "groups": [
+        {"name": "g", "headers": null, "records": [["héllo"]]}]},
+      "canonical": "1d671e68c3a96c6c6f"
+    },
+    {
+      "name": "file-two-groups",
+      "desc": "Document with FS name and two groups; canonical form has no EOT",
+      "build": {"file": "db", "groups": [
+        {"name": "g1", "headers": null, "records": [["a"]]},
+        {"name": "g2", "headers": null, "records": [["b"]]}]},
+      "canonical": "1c64621d67311e611d67321e62"
+    }
+  ]
+}

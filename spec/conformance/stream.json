@@ -1,0 +1,58 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "name": "two-commits",
+      "desc": "Two records, each ETB-committed",
+      "bytes": "1e61171e6217",
+      "committed_end": 6, "torn": false,
+      "blocks": ["1e61", "1e62"],
+      "records": [["a"], ["b"]]
+    },
+    {
+      "name": "torn-tail",
+      "desc": "Uncommitted trailing record is skipped",
+      "bytes": "1e61171e62",
+      "committed_end": 3, "torn": true,
+      "blocks": ["1e61"],
+      "records": [["a"]]
+    },
+    {
+      "name": "batch-block",
+      "desc": "Two records under one commit form one atomic block",
+      "bytes": "1e611e6217",
+      "committed_end": 5, "torn": false,
+      "blocks": ["1e611e62"],
+      "records": [["a"], ["b"]]
+    },
+    {
+      "name": "escaped-etb-not-commit",
+      "desc": "DLE-escaped ETB is data; nothing is committed",
+      "bytes": "1e611017",
+      "committed_end": 0, "torn": true,
+      "blocks": []
+    },
+    {
+      "name": "etb-in-scope-not-commit",
+      "desc": "ETB inside an STX/ETX scope is record content, not a commit",
+      "bytes": "1e021703",
+      "committed_end": 0, "torn": true,
+      "blocks": []
+    },
+    {
+      "name": "payload-in-committed-region",
+      "desc": "ETB payload extends committed_end but is excluded from the block",
+      "bytes": "1e611763616665",
+      "committed_end": 7, "torn": false,
+      "blocks": ["1e61"],
+      "records": [["a"]]
+    },
+    {
+      "name": "empty-stream",
+      "desc": "Empty buffer: no commits, not torn",
+      "bytes": "",
+      "committed_end": 0, "torn": false,
+      "blocks": []
+    }
+  ]
+}

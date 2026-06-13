@@ -24,6 +24,7 @@ full specification and future directions.
 | 0x04 | EOT | ␄ | End of document / message |
 | 0x05 | ENQ | ␅ | Reference (look up named data) |
 | 0x10 | DLE | ␐ | Escape (next byte is literal) |
+| 0x17 | ETB | ␗ | Commit marker (stream mode) |
 | 0x1A | SUB | ␚ | Substitution (C0DIFF) |
 | 0x1C | FS  | ␜ | File / Database separator |
 | 0x1D | GS  | ␝ | Group / Table / Section separator |

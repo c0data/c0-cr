@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "cases": [
+    {"name": "unassigned-nul", "desc": "NUL (0x00) is unassigned", "bytes": "1e00"},
+    {"name": "unassigned-ack", "desc": "ACK (0x06) is unassigned", "bytes": "1e06"},
+    {"name": "unassigned-can", "desc": "CAN (0x18) is unassigned (reserved, not yet a code)", "bytes": "1e6118"},
+    {"name": "dangling-dle", "desc": "DLE at end of input has nothing to escape", "bytes": "1e6110"}
+  ]
+}

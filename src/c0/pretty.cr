@@ -123,6 +123,15 @@ module C0
           when US
             io << glyph(byte)
             pos += 1
+          when ETB
+            # Commit marker not attached to a record line (e.g. after a
+            # group-name line). Indented on its own line with any payload.
+            write_indent(io, indent, depth + 1) if line_start
+            io << glyph(byte)
+            pos += 1
+            write_data_until_control(buf, pos, io) { |new_pos| pos = new_pos }
+            io << '\n'
+            line_start = true
           else
             # Unassigned — show glyph
             io << glyph(byte)
@@ -259,6 +268,14 @@ module C0
         elsif byte == ENQ
           io << glyph(ENQ)
           pos += 1
+        elsif byte == ETB
+          # Commit marker stays on the record's line, with any payload
+          io << glyph(ETB)
+          pos += 1
+          while pos < len && ptr[pos] >= 0x20_u8
+            io.write_byte(ptr[pos])
+            pos += 1
+          end
         elsif byte == STX
           io << glyph(STX)
           pos += 1

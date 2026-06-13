@@ -81,6 +81,7 @@ module C0
       when C0::ETX then yield_control(TokenType::ETX) { |t| yield t }
       when C0::EOT then yield_control(TokenType::EOT) { |t| yield t }
       when C0::ENQ then yield_control(TokenType::ENQ) { |t| yield t }
+      when C0::ETB then yield_control(TokenType::ETB) { |t| yield t }
       when C0::SUB then yield_control(TokenType::SUB) { |t| yield t }
       when C0::FS  then yield_control(TokenType::FS)  { |t| yield t }
       when C0::GS  then yield_control(TokenType::GS)  { |t| yield t }

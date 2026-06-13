@@ -10,6 +10,7 @@ module C0
     EOT # End of document
     ENQ # Reference
     DLE # Escape (consumed during tokenization, not emitted)
+    ETB # Commit marker (stream mode)
     SUB # Substitution
     FS  # File separator
     GS  # Group separator

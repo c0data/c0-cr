@@ -81,6 +81,10 @@ properties:
   file:
     type: string
     description: Input file (reads stdin if omitted)
+  stream:
+    type: boolean
+    short: s
+    description: Validate as a stream-mode log (report torn tail)
 YAML
 
 cli = Jargon.cli("c0fmt", yaml: SCHEMA)
@@ -140,6 +144,22 @@ cli.run do |result|
 
         when "validate"
           buf = to_compact(input)
+          if result["stream"]?.try(&.as_bool)
+            reader = C0::Stream::Reader.new(buf)
+            begin
+              C0::Tokenizer.new(reader.committed).each { }
+            rescue ex : C0::Error
+              STDERR.puts "invalid: #{ex.message}"
+              exit 1
+            end
+            if reader.torn?
+              STDERR.puts "torn: #{reader.tail.size} uncommitted byte(s) after " \
+                          "#{reader.block_count} committed block(s)"
+              exit 1
+            end
+            STDERR.puts "valid: #{reader.block_count} committed block(s)"
+            exit 0
+          end
           begin
             C0::Tokenizer.new(buf).each { }
             STDERR.puts "valid"
