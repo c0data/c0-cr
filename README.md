@@ -333,7 +333,9 @@ C0DATA has two representations:
 Compact form is canonical in the strong sense: the same logical value
 encodes to exactly one byte sequence, so compact bytes can be hashed for
 content addressing (see DESIGN.md "Canonical Form"). `C0.canonical?(buf)`
-checks a buffer; conformance vectors live in `spec/conformance/`.
+checks a buffer; the shared conformance vectors live in the
+[c0-spec](https://github.com/trans/c0-spec) submodule at `c0-spec/` (run
+`git submodule update --init` after cloning).
 
 The `c0fmt` command-line tool converts between them and more.
 

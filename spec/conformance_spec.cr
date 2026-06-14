@@ -1,12 +1,12 @@
 require "./spec_helper"
 require "json"
 
-# Runs the language-agnostic conformance vectors in spec/conformance/.
-# These fixtures are the normative companion to DESIGN.md's "Canonical
-# Form" section — other implementations (c0-go, c0-js, c0-rs) consume
-# the same JSON files.
+# Runs the shared conformance vectors from the c0-spec submodule
+# (https://github.com/trans/c0-spec), the source of truth. These fixtures
+# are the normative companion to DESIGN.md's "Canonical Form" section;
+# every implementation (c0-js, c0-rs, c0-c, …) consumes the same files.
 
-CONFORMANCE_DIR = File.join(__DIR__, "conformance")
+CONFORMANCE_DIR = File.join(__DIR__, "..", "c0-spec", "vectors")
 
 private def conformance_cases(file : String) : Array(::JSON::Any)
   ::JSON.parse(File.read(File.join(CONFORMANCE_DIR, file)))["cases"].as_a

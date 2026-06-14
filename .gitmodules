@@ -1,0 +1,3 @@
+[submodule "c0-spec"]
+	path = c0-spec
+	url = https://github.com/trans/c0-spec.git

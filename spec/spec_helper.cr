@@ -1,4 +1,4 @@
-# Language-agnostic conformance vectors live in spec/conformance/
-# (run by conformance_spec.cr; consumable by c0-go, c0-js, c0-rs).
+# Shared conformance vectors come from the c0-spec submodule (c0-spec/vectors/,
+# run by conformance_spec.cr). c0-spec is the source of truth for all impls.
 require "spec"
 require "../src/c0"
