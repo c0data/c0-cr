@@ -170,7 +170,7 @@ module C0
     end
 
     # Writes a name (label or header). Names are identifiers, not
-    # values — control bytes are illegal in them (see DESIGN.md
+    # values — control bytes are illegal in them (see the C0 spec
     # "Canonical Form").
     private def write_name(str : String) : Nil
       str.each_byte do |byte|

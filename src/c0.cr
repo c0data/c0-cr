@@ -1,5 +1,5 @@
 module C0
-  VERSION = "0.9.0"
+  VERSION = "0.9.1"
 
   # Assigned C0 control codes
   SOH = 0x01_u8 # Header (field name declarations)
@@ -55,7 +55,7 @@ module C0
   end
 
   # Whether bytes are a canonical document unit for content addressing
-  # (see DESIGN.md "Canonical Form"): well-formed, minimally escaped
+  # (see the C0 spec "Canonical Form"): well-formed, minimally escaped
   # (DLE appears only before bytes < 0x20), and free of framing bytes
   # (ETB, EOT). Stream logs validate per-block, not with this check.
   def self.canonical?(buf : Bytes) : Bool

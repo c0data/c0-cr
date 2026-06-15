@@ -146,7 +146,7 @@ Add the dependency to your `shard.yml`:
 ```yaml
 dependencies:
   c0:
-    github: trans/c0data
+    github: c0data/c0-cr
 ```
 
 Then run `shards install`.
@@ -332,9 +332,9 @@ C0DATA has two representations:
 
 Compact form is canonical in the strong sense: the same logical value
 encodes to exactly one byte sequence, so compact bytes can be hashed for
-content addressing (see DESIGN.md "Canonical Form"). `C0.canonical?(buf)`
+content addressing (see the spec's "Canonical Form"). `C0.canonical?(buf)`
 checks a buffer; the shared conformance vectors live in the
-[c0-spec](https://github.com/trans/c0-spec) submodule at `c0-spec/` (run
+[c0-spec](https://github.com/c0data/c0-spec) submodule at `c0-spec/` (run
 `git submodule update --init` after cloning).
 
 The `c0fmt` command-line tool converts between them and more.
@@ -445,7 +445,7 @@ crystal build src/c0fmt.cr -o bin/c0fmt --release
 
 ## Design
 
-See [DESIGN.md](DESIGN.md) for the full specification, including open
+See the [specification](https://github.com/c0data/c0-spec/blob/main/DESIGN.md) (in the c0-spec submodule) for the full definition, including open
 questions and future directions.
 
 ## Development
