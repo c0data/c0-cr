@@ -244,4 +244,4 @@ of JSON (~580 bytes). The C0 schema is ~24 lines (~210 bytes compact).
 ## Feedback
 
 Comments and questions welcome. Open an issue at
-https://github.com/trans/c0data/issues or discuss in the repo.
+https://github.com/c0data/c0-spec/issues or discuss in the repo.

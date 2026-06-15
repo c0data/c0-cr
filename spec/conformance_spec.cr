@@ -2,7 +2,7 @@ require "./spec_helper"
 require "json"
 
 # Runs the shared conformance vectors from the c0-spec submodule
-# (https://github.com/trans/c0-spec), the source of truth. These fixtures
+# (https://github.com/c0data/c0-spec), the source of truth. These fixtures
 # are the normative companion to the spec's "Canonical Form" section;
 # every implementation (c0-js, c0-rs, c0-c, …) consumes the same files.
 
