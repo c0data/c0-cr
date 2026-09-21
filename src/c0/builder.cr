@@ -133,6 +133,18 @@ module C0
       @io.write_byte(ETX)
     end
 
+    # Write a field whose value is a flat list: US, then the items as a
+    # nested STX…ETX scope separated by US. Read back with `Record#list`.
+    def nested_field(items : Indexable(String)) : Nil
+      @io.write_byte(US)
+      @io.write_byte(STX)
+      items.each_with_index do |item, i|
+        @io.write_byte(US) if i > 0
+        write_escaped(item)
+      end
+      @io.write_byte(ETX)
+    end
+
     # Write a raw field value (for use within records when building
     # fields individually).
     def field(value : String) : Nil
