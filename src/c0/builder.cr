@@ -116,19 +116,21 @@ module C0
       @io.write_byte(ETX)
     end
 
-    # Write a reference to a named group.
+    # Write a reference to a named group. Reference targets are names,
+    # so control bytes are rejected (see `write_name`).
     def ref(name : String) : Nil
       @io.write_byte(ENQ)
-      @io << name
+      write_name(name)
     end
 
-    # Write a path reference (group, record id, optional field).
+    # Write a path reference (group, record id, optional field). Each
+    # segment is a name, so control bytes are rejected.
     def ref(*path : String) : Nil
       @io.write_byte(ENQ)
       @io.write_byte(STX)
       path.each_with_index do |segment, i|
         @io.write_byte(US) if i > 0
-        @io << segment
+        write_name(segment)
       end
       @io.write_byte(ETX)
     end

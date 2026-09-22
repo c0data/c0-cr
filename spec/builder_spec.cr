@@ -190,3 +190,14 @@ describe "C0::Builder#list_field" do
     rec.list(2).should eq([] of Bytes)
   end
 end
+
+describe "C0::Builder#ref name guard" do
+  it "rejects control bytes in reference names and path segments" do
+    expect_raises(ArgumentError, /control bytes/) { C0::Builder.new.ref("bad\u001Fname") }
+    expect_raises(ArgumentError, /control bytes/) { C0::Builder.new.ref("users", "01\u001E", "name") }
+    b = C0::Builder.new
+    b.ref("users")
+    b.ref("users", "01", "name")
+    String.new(b.to_slice).should eq("\u0005users\u0005\u0002users\u001F01\u001Fname\u0003")
+  end
+end
