@@ -148,3 +148,45 @@ describe C0::Builder do
     String.new(t.record(1).field(1)).should eq("5")
   end
 end
+
+describe "C0::Builder#list_field" do
+  it "writes a US-separated list inside STX/ETX as one field" do
+    buf = C0::Builder.build do |b|
+      b.group("users") do
+        b.record("Alice")
+        b.list_field(["Admin", "Editor", "User"])
+        b.field("1502.30")
+      end
+    end
+    expected = String.build do |s|
+      s.write_byte(C0::GS); s << "users"
+      s.write_byte(C0::RS); s << "Alice"
+      s.write_byte(C0::US); s.write_byte(C0::STX)
+      s << "Admin"; s.write_byte(C0::US); s << "Editor"; s.write_byte(C0::US); s << "User"
+      s.write_byte(C0::ETX)
+      s.write_byte(C0::US); s << "1502.30"
+    end
+    String.new(buf).should eq(expected)
+
+    rec = C0::Table.new(buf).record(0)
+    rec.field_count.should eq(3)
+    String.new(rec.value(0)).should eq("Alice")
+    rec.list(1).map { |i| String.new(i) }.should eq(["Admin", "Editor", "User"])
+    String.new(rec.value(2)).should eq("1502.30")
+  end
+
+  it "round-trips escaped items and empty lists through Record#list" do
+    items = ["a\u001Fb", "", "c\u0002d", "plain"]
+    buf = C0::Builder.build do |b|
+      b.group("t") do
+        b.record("x")
+        b.list_field(items)
+        b.list_field([] of String)
+      end
+    end
+    rec = C0::Table.new(buf).record(0)
+    rec.field_count.should eq(3)
+    rec.list(1).map { |i| String.new(i) }.should eq(items)
+    rec.list(2).should eq([] of Bytes)
+  end
+end

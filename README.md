@@ -237,6 +237,19 @@ doc["users"].table.record(0).field(0)   # => "Alice" (zero-copy slice)
 doc["users"].table.record(0).field(1)   # => "1502.30"
 ```
 
+A field whose value is a flat list (US-separated items inside STX/ETX) is
+written with `list_field` and read back with `Record#list`:
+
+```crystal
+buf = C0::Builder.build do |b|
+  b.group("users") do
+    b.record("Alice")
+    b.list_field(["Admin", "Editor"])   # one field: ␂Admin␟Editor␃
+  end
+end
+C0::Table.new(buf).record(0).list(1)  # => ["Admin", "Editor"] (unescaped slices)
+```
+
 ### Pretty-Printing
 
 ```crystal

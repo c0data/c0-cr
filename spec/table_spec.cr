@@ -117,3 +117,39 @@ describe C0::Table do
     names.should eq(["a", "b", "c"])
   end
 end
+
+describe "C0::Record#list" do
+  it "splits an STX/ETX scope on top-level US and unescapes items" do
+    b = buf(
+      C0::GS, "t",
+      C0::RS, "Alice",
+      C0::US, C0::STX, "Admin", C0::US, "Ed", C0::DLE, C0::US, "itor", C0::US, "User", C0::ETX,
+      C0::US, "1502.30"
+    )
+    rec = C0::Table.new(b).record(0)
+    rec.field_count.should eq(3)
+    rec.list(1).map { |i| String.new(i) }.should eq(["Admin", "Ed\u001Fitor", "User"])
+  end
+
+  it "does not split on US inside a nested scope within the list" do
+    b = buf(
+      C0::GS, "t",
+      C0::RS, C0::STX, "a", C0::US, C0::STX, "x", C0::US, "y", C0::ETX, C0::US, "b", C0::ETX
+    )
+    items = C0::Table.new(b).record(0).list(0)
+    items.size.should eq(3)
+    String.new(items[0]).should eq("a")
+    items[1][0].should eq(C0::STX)
+    String.new(items[2]).should eq("b")
+  end
+
+  it "returns a plain field as a single-item list and an empty scope as empty" do
+    b = buf(
+      C0::GS, "t",
+      C0::RS, "plain", C0::US, C0::STX, C0::ETX
+    )
+    rec = C0::Table.new(b).record(0)
+    rec.list(0).map { |i| String.new(i) }.should eq(["plain"])
+    rec.list(1).should eq([] of Bytes)
+  end
+end

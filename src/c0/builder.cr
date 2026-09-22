@@ -133,9 +133,10 @@ module C0
       @io.write_byte(ETX)
     end
 
-    # Write a field whose value is a flat list: US, then the items as a
-    # nested STX…ETX scope separated by US. Read back with `Record#list`.
-    def nested_field(items : Indexable(String)) : Nil
+    # Write a field whose value is a flat list (spec: "arrays are
+    # US-separated values inside STX/ETX"): US, STX, the items separated
+    # by US, ETX. Read back with `Record#list`.
+    def list_field(items : Indexable(String)) : Nil
       @io.write_byte(US)
       @io.write_byte(STX)
       items.each_with_index do |item, i|

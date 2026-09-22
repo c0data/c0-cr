@@ -253,6 +253,39 @@ module C0
       (0...field_count).map { |i| value(i) }
     end
 
+    # Field n as a flat list: the items of its STX/ETX scope split on
+    # top-level US, each DLE-unescaped (mirrors `#value`). Inverse of
+    # `Builder#list_field`. A field that is not an STX/ETX scope is
+    # returned as a single-item list holding its value; an empty scope
+    # is an empty list.
+    def list(n : Int32) : Array(Bytes)
+      raw = field(n)
+      return [C0.unescape(raw)] unless raw.size > 0 && raw[0] == STX
+      stop = raw.size
+      stop -= 1 if stop > 1 && raw[stop - 1] == ETX
+      items = Array(Bytes).new
+      return items if stop <= 1
+      ptr = raw.to_unsafe
+      pos = 1
+      item_start = pos
+      while pos < stop
+        byte = ptr[pos]
+        if byte == US
+          items << C0.unescape(raw[item_start...pos])
+          pos += 1
+          item_start = pos
+        elsif byte == DLE
+          pos += 2
+        elsif byte == STX
+          pos = skip_nested(ptr, pos, stop)
+        else
+          pos += 1
+        end
+      end
+      items << C0.unescape(raw[item_start...stop])
+      items
+    end
+
     # Raw bytes of the entire record.
     @[AlwaysInline]
     def raw : Bytes
