@@ -121,6 +121,39 @@ describe "conformance" do
     end
   end
 
+  describe "list.json" do
+    conformance_cases("list.json").each do |c|
+      it c["name"].as_s do
+        bytes = c["bytes"].as_s.hexbytes
+        expected = c["record"].as_a
+        rec = C0::Table.new(bytes).record(0)
+        rec.field_count.should eq(expected.size)
+        expected.each_with_index do |f, i|
+          if items = f.as_a?
+            rec.list(i).should eq(items.map { |x| field_bytes(x) })
+          else
+            rec.value(i).should eq(field_bytes(f))
+          end
+        end
+
+        if c["canonical"].as_bool
+          buf = C0::Builder.build do |b|
+            b.record(String.new(field_bytes(expected[0])))
+            expected[1..].each do |f|
+              if items = f.as_a?
+                b.list_field(items.map { |x| String.new(field_bytes(x)) })
+              else
+                b.field(String.new(field_bytes(f)))
+              end
+            end
+          end
+          buf.hexstring.should eq(c["bytes"].as_s)
+          C0.canonical?(buf).should be_true
+        end
+      end
+    end
+  end
+
   describe "stream.json" do
     conformance_cases("stream.json").each do |c|
       it c["name"].as_s do
