@@ -1,5 +1,5 @@
 name: c0
-version: 0.10.1
+version: 0.11.0
 
 authors:
   - Thomas Sawyer <transfire@gmail.com>
@@ -7,12 +7,3 @@ authors:
 crystal: '>= 1.19.1'
 
 license: MIT
-
-dependencies:
-  jargon:
-    github: trans/jargon
-    version: ">= 0.20.1"
-
-targets:
-  c0fmt:
-    main: src/c0fmt.cr
