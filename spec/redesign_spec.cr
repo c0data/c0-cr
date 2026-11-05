@@ -95,6 +95,12 @@ describe "JSON" do
   end
 end
 
+describe "Builder" do
+  it "refuses an empty note" do
+    expect_raises(ArgumentError) { C0::Builder.build { |b| b.record("a"); b.note("") } }
+  end
+end
+
 describe "Validator" do
   it "finds a non-adjacent duplicate key" do
     C0.canonical?(C0::Pretty.parse("␞␁a␟1␁b␟2␁a␟3")).should be_false

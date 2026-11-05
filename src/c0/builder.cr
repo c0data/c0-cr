@@ -264,6 +264,7 @@ module C0
 
     # A note at the current position (record level, or as an empty unit).
     def note(text : String) : Nil
+      raise ArgumentError.new("a note needs content: BEL before a code marks it dead") if text.empty?
       @io.write_byte(BEL)
       if C0.plain?(text.to_slice)
         @io.write(text.to_slice)
