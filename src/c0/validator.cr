@@ -245,7 +245,12 @@ module C0
         break unless pos < stop && ptr[pos] == BEL
         p2 = Scan.layout(@buf, pos + 1, stop)
         raise UnexpectedEndError.new("BEL at end of input", p2) if p2 >= stop
-        break if ptr[p2] < 0x20_u8 && ptr[p2] != STX # a dead element, not a note
+        if ptr[p2] < 0x20_u8 && ptr[p2] != STX
+          c = ptr[p2]
+          # a dead element, not a note; BEL before any other code matches nothing
+          break if c == FS || c == GS || c == RS || c == SOH || c == DLE
+          raise SyntaxError.new("BEL before a code that is not an element", p2)
+        end
         not_canonical("comment")
         pos = p2 < stop ? Scan.plain(@buf, p2, stop) : p2
         if p2 < stop && ptr[p2] == STX

@@ -95,6 +95,32 @@ describe "JSON" do
   end
 end
 
+describe "Document" do
+  it "ends the heading at a dead record" do
+    doc = C0::Document.new(C0::Pretty.parse("␖␁shape␟tabular␇␞dead␞live"))
+    doc.heading.keys.size.should eq(1)
+    doc.body.records.map { |r| String.new(r.value(0)) }.should eq(["live"])
+  end
+
+  it "keeps a dead keyed unit and a note in the heading" do
+    doc = C0::Document.new(C0::Pretty.parse("␖␁shape␟tabular␇␁x␟y␇note␞live"))
+    doc.heading.keys.size.should eq(1)
+    doc.body.records.size.should eq(1)
+  end
+
+  it "warns on unknown shape and version" do
+    doc = C0::Document.new(C0::Pretty.parse("␖␁shape␟weird␁version␟2␞a␄"))
+    doc.warnings.should contain("unknown shape 'weird'")
+    doc.warnings.should contain("unknown version '2'")
+  end
+
+  it "warns on EM without a blob table and on a blob in a later heading" do
+    c = C0::Container.new(C0::Pretty.parse("␖␞a␄␖␁blob␟␐␁␞name␟offset␟length␞x␟0␟1␘␞b␄␙Z"))
+    c.warnings.should contain("blob table in a later heading is ignored")
+    c.warnings.should contain("EM with no blob table: the region is unaddressable")
+  end
+end
+
 describe "Builder" do
   it "refuses an empty note" do
     expect_raises(ArgumentError) { C0::Builder.build { |b| b.record("a"); b.note("") } }
@@ -102,6 +128,11 @@ describe "Builder" do
 end
 
 describe "Validator" do
+  it "rejects BEL before a non-element code in a diff body instead of looping" do
+    buf = C0::Pretty.parse("␖␁shape␟diff␜a␝␇␟x␚Y")
+    expect_raises(C0::SyntaxError) { C0.validate(buf) }
+  end
+
   it "finds a non-adjacent duplicate key" do
     C0.canonical?(C0::Pretty.parse("␞␁a␟1␁b␟2␁a␟3")).should be_false
     C0.canonical?(C0::Pretty.parse("␞␁a␟1␁b␟2␁c␟3")).should be_true

@@ -30,9 +30,10 @@ module C0
       self["version"].try { |v| String.new(v).to_i? } || 1
     end
 
-    # The blob table as a Body, when declared.
+    # The blob table as a Body, when declared as a level (anything else
+    # declares nothing; see Container#warnings).
     def blob : Body?
-      raw_blob.try { |r| Body.new(r, 1, Scan.level(r, 0) - 1) }
+      raw_blob.try { |r| r.size > 0 && r[0] == DLE ? Body.new(r, 1, Scan.level(r, 0) - 1) : nil }
     end
 
     # Raw unit of the blob key (a level), or nil.
@@ -57,6 +58,8 @@ module C0
   # `Document.new(buf)` reads the first document in the buffer. Use
   # `Container` for a buffer holding several documents or an EM tail.
   struct Document
+    SHAPES = {"diff", "stream", "tabular", "document", "key-value"}
+
     getter buf : Bytes
     getter heading : Heading
     getter body : Body
@@ -93,6 +96,12 @@ module C0
       @heading.keys.each do |k|
         s = String.new(k)
         @warnings << "unknown heading key '#{s}'" unless s == "shape" || s == "version" || s == "blob"
+      end
+      if (sh = @heading.shape) && !SHAPES.includes?(sh)
+        @warnings << "unknown shape '#{sh}'"
+      end
+      if (v = @heading["version"]) && String.new(v) != "1"
+        @warnings << "unknown version '#{String.new(v)}'"
       end
     end
 
@@ -174,6 +183,17 @@ module C0
           pairs << {key, rawv.size > 0 && rawv[0] == DLE ? rawv : C0.value(rawv)}
           pos = ve
         elsif b == BEL
+          # a note or a dead keyed unit belongs to the heading; a dead body
+          # element (record, header row, group, file, level) begins the body
+          p2 = Scan.layout(buf, pos + 1, len)
+          break if p2 >= len
+          c = ptr[p2]
+          if c == SOH
+            p3 = Scan.layout(buf, p2 + 1, len)
+            break if p3 < len && ptr[p3] == RS # dead header row
+          elsif c < 0x20_u8 && c != STX
+            break
+          end
           pos = Scan.comment(buf, pos, len)
         elsif b >= 0x20_u8
           raise SyntaxError.new("plain text directly after SYN", pos)
@@ -216,11 +236,15 @@ module C0
     getter documents : Array(Document)
     getter tail : Bytes
     getter? has_em : Bool
+    # Loud warnings about the container as a whole; each document carries
+    # its own.
+    getter warnings : Array(String)
 
     def initialize(buf : Bytes)
       @documents = Array(Document).new
       @tail = Bytes.empty
       @has_em = false
+      @warnings = Array(String).new
       ptr = buf.to_unsafe
       len = buf.size.to_i32
       pos = Scan.layout(buf, 0, len)
@@ -237,6 +261,17 @@ module C0
           raise SyntaxError.new("unexpected byte after EOT", pos)
         end
       end
+      @documents.each_with_index do |doc, i|
+        next unless raw = doc.heading.raw_blob
+        if i > 0
+          @warnings << "blob table in a later heading is ignored"
+        elsif raw.size == 0 || raw[0] != DLE
+          @warnings << "blob is not a level: declares nothing"
+        elsif !(doc.heading.blob.try { |b| b.groups.first?.try(&.has_header?) })
+          @warnings << "blob table has no header row: declares nothing"
+        end
+      end
+      @warnings << "EM with no blob table: the region is unaddressable" if @has_em && blob.nil?
     end
 
     def first : Document
