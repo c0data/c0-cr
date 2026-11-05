@@ -111,9 +111,20 @@ module C0
         ns = pos
         pos = Scan.plain(@buf, pos, @stop)
         ne = pos
-        f = FileView.new(@buf, ns, ne, Array(Group).new)
-        pos = index_part(pos, f)
-        @files << f unless dead
+        if dead
+          # a dead file line is read as if absent: what follows belongs to
+          # the file before it, its leading items to that file's last group
+          prev = @files.last?
+          unless prev
+            prev = file
+            @files << file
+          end
+          pos = index_part(pos, prev, prev.groups.last?)
+        else
+          f = FileView.new(@buf, ns, ne, Array(Group).new)
+          pos = index_part(pos, f)
+          @files << f
+        end
       end
       @files << FileView.new(@buf, 0, 0, Array(Group).new) if @files.empty?
     end
@@ -127,12 +138,13 @@ module C0
 
     # Index one part: leading items (unnamed group), then groups. Returns
     # the position of the next FS (or dead FS), or @stop.
-    private def index_part(pos : Int32, file : FileView) : Int32
+    private def index_part(pos : Int32, file : FileView, cont : Group? = nil) : Int32
       ptr = @buf.to_unsafe
-      # unnamed group
-      g = Group.new(@buf, 0, 0, 0, nil, Array(Record).new)
+      # leading items: the unnamed group, or `cont` when continuing after a
+      # dead file line
+      g = cont || Group.new(@buf, 0, 0, 0, nil, Array(Record).new)
       pos = index_group_contents(pos, g)
-      file.groups << g if g.header || !g.records.empty?
+      file.groups << g if cont.nil? && (g.header || !g.records.empty?)
       current = g
       while pos < @stop
         b = ptr[pos]
