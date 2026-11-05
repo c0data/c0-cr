@@ -96,6 +96,16 @@ describe "JSON" do
 end
 
 describe "CSV" do
+  it "writes a reference as its path and picks a named group" do
+    buf = C0::Pretty.parse("␝a␞1␝links␁␞user␟tag␞␅␂users␟1␃␟␅tags")
+    C0::CSV.to_csv(buf, "links").should eq("user,tag\nusers/1,tags\n")
+  end
+
+  it "refuses a nested level" do
+    buf = C0::Pretty.parse("␞a␟␐␞x␘")
+    expect_raises(C0::Error, /nested level/) { C0::CSV.to_csv(buf) }
+  end
+
   it "round-trips" do
     csv = "name,amount\nAlice,100\nBob,\"a, b\"\n"
     buf = C0::CSV.from_csv(csv, "t")
