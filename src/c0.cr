@@ -333,14 +333,11 @@ module C0
     first = t[0]
     if first == STX
       stop = Scan.text(t, 0)
-      rest = Scan.layout(t, stop)
-      raise SyntaxError.new("text cannot be part of a plain value", rest) if rest < t.size
+      only_notes_after(t, stop, "text cannot be part of a plain value")
       decode_text(t[1...(stop - 1)])
     elsif first == BEL
       # a note, or a dead level: the unit is empty
-      stop = Scan.comment(t, 0)
-      rest = Scan.layout(t, stop)
-      raise SyntaxError.new("value after a comment in the same unit", rest) if rest < t.size
+      only_notes_after(t, 0, "value after a comment in the same unit")
       Bytes.empty
     elsif first == DLE
       raise SyntaxError.new("a nested level is not a scalar value", 0)
@@ -352,10 +349,8 @@ module C0
       while i < t.size
         b = ptr[i]
         if b == BEL
-          # a note after the value: skipped
-          stop = Scan.comment(t, i)
-          rest = Scan.layout(t, stop)
-          raise SyntaxError.new("value after a note in the same unit", rest) if rest < t.size
+          # notes after the value: skipped
+          only_notes_after(t, i, "value after a note in the same unit")
           return trim(t[0...i])
         elsif b < 0x20_u8
           raise SyntaxError.new(layout?(b) ? "layout code inside a plain value" : "control code inside a plain value", i)
@@ -363,6 +358,15 @@ module C0
         i += 1
       end
       t
+    end
+  end
+
+  # From pos to the end of the unit only notes (and layout) may follow.
+  private def self.only_notes_after(t : Bytes, pos : Int32, what : String) : Nil
+    pos = Scan.layout(t, pos)
+    while pos < t.size
+      raise SyntaxError.new(what, pos) unless t[pos] == BEL
+      pos = Scan.layout(t, Scan.comment(t, pos))
     end
   end
 
