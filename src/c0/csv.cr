@@ -2,74 +2,32 @@ require "csv"
 
 module C0
   module CSV
-    # Convert CSV text to C0DATA compact bytes.
-    #
-    # The first row is treated as headers, remaining rows as records.
-    # The result is a single group (GS + name + SOH headers + RS records).
+    # CSV text → one group with a header row and positional records.
     def self.from_csv(input : String, group_name : String = "data") : Bytes
       rows = ::CSV.parse(input)
       return Bytes.empty if rows.empty?
-
       Builder.build do |b|
-        headers = rows[0]
-        b.group(group_name, headers: headers) do
-          rows[1..].each do |row|
-            b.record(row)
-          end
-        end
+        b.group(group_name, rows[0])
+        rows[1..].each { |row| b.record(row) }
       end
     end
 
-    # Convert C0DATA compact bytes to CSV text.
-    #
-    # Expects a buffer containing at least one group with tabular data.
-    # Outputs headers (if present) as the first row, then each record.
+    # The first group of a buffer → CSV text (header row first if present).
     def self.to_csv(buf : Bytes) : String
-      table = find_table(buf)
+      g = find_group(buf)
       ::CSV.build do |csv|
-        if table.header_count > 0
-          csv.row do |row|
-            table.header_count.times do |i|
-              row << String.new(table.header(i))
-            end
-          end
+        if g.has_header?
+          csv.row { |row| g.headers.each { |h| row << String.new(h) } }
         end
-        table.each_record do |rec|
-          csv.row do |row|
-            rec.field_count.times do |i|
-              row << unescape(rec.field(i))
-            end
-          end
+        g.each_record do |rec|
+          csv.row { |row| rec.values.each { |v| row << String.new(v) } }
         end
       end
     end
 
-    # Find the first table in the buffer. Tries Document parsing first
-    # (for FS-prefixed data), falls back to bare Table.
-    private def self.find_table(buf : Bytes) : Table
-      if buf.size > 0 && buf[0] == FS
-        doc = Document.new(buf)
-        if doc.group_count > 0
-          return doc.group(0).table
-        end
-      end
-      Table.new(buf)
-    end
-
-    # Unescape DLE sequences in a field value, returning a String.
-    private def self.unescape(field : Bytes) : String
-      io = IO::Memory.new(field.size)
-      pos = 0
-      while pos < field.size
-        if field[pos] == DLE && pos + 1 < field.size
-          pos += 1
-          io.write_byte(field[pos])
-        else
-          io.write_byte(field[pos])
-        end
-        pos += 1
-      end
-      String.new(io.to_slice)
+    private def self.find_group(buf : Bytes) : Group
+      body = Document.new(buf).body
+      body.groups.first? || raise Error.new("no group in buffer")
     end
   end
 end

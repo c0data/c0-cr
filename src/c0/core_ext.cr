@@ -1,4 +1,5 @@
 class Array(T)
+  # Serializable items → one group with a header row and one record each.
   def to_c0(group_name : String? = nil) : Bytes
     raise C0::Error.new("Cannot serialize empty array") if empty?
     io = IO::Memory.new
@@ -16,13 +17,15 @@ class Array(T)
 end
 
 struct NamedTuple
+  # One group holding one keyed record.
   def to_c0(group_name : String = "data") : Bytes
     io = IO::Memory.new
     io.write_byte(C0::GS)
-    io << group_name
-    {% for key in T.keys %}
-      io.write_byte(C0::RS)
-      io << {{ key.stringify }}
+    C0.write_name(io, group_name.to_slice)
+    io.write_byte(C0::RS)
+    {% for key in T.keys.sort %}
+      io.write_byte(C0::SOH)
+      C0.write_name(io, {{ key.stringify }}.to_slice)
       io.write_byte(C0::US)
       C0::Serializable._serialize_field(self[{{ key.symbolize }}], io)
     {% end %}
@@ -35,14 +38,17 @@ struct NamedTuple
 end
 
 class Hash(K, V)
+  # One group holding one keyed record, keys sorted.
   def to_c0(group_name : String = "data") : Bytes
     io = IO::Memory.new
     io.write_byte(C0::GS)
-    io << group_name
-    each do |k, v|
-      io.write_byte(C0::RS)
-      C0::Serializable._serialize_field(k, io)
+    C0.write_name(io, group_name.to_slice)
+    io.write_byte(C0::RS)
+    keys.map(&.to_s).sort!.each do |k|
+      io.write_byte(C0::SOH)
+      C0.write_name(io, k.to_slice)
       io.write_byte(C0::US)
+      v = self[keys.find! { |kk| kk.to_s == k }]
       C0::Serializable._serialize_field(v, io)
     end
     io.to_slice.dup
