@@ -1,25 +1,8 @@
 module C0
-  class Error < Exception; end
-
-  class UnassignedCodeError < Error
-    getter byte : UInt8
-    getter position : Int32
-
-    def initialize(@byte, @position)
-      super("Unassigned control code 0x#{@byte.to_s(16).rjust(2, '0')} at position #{@position}")
-    end
-  end
-
-  class UnexpectedEndError < Error
-    def initialize
-      super("Unexpected end of input after DLE escape")
-    end
-  end
-
-  # High-performance zero-copy tokenizer for C0DATA.
-  #
-  # Scans a byte buffer for control codes (< 0x20) and emits tokens as
-  # offsets into the original buffer. No allocation for data values.
+  # Zero-copy tokenizer. Scans a byte buffer and emits tokens as offsets
+  # into it: plain runs, layout runs, whole texts, and one token per code.
+  # It does not check structure (see Validator); it stops the raw region
+  # at EM and raises on unassigned codes and malformed text.
   #
   # The hot loop is a single comparison: `byte < 0x20`.
   struct Tokenizer
@@ -32,85 +15,87 @@ module C0
       @len = @buf.size.to_i32
     end
 
-    # Yields each token to the block. This is the primary interface
-    # for streaming consumption.
-    def each(& : Token ->) : Nil
-      while @pos < @len
-        byte = @buf.to_unsafe[@pos]
+    # Position of the first byte after EM, or the buffer size.
+    getter tail_start : Int32 = -1
 
+    def each(& : Token ->) : Nil
+      ptr = @buf.to_unsafe
+      while @pos < @len
+        byte = ptr[@pos]
         if byte < 0x20_u8
-          handle_control(byte) { |token| yield token }
+          case byte
+          when STX
+            stop = Scan.text(@buf, @pos)
+            yield Token.new(TokenType::Text, @pos, stop)
+            @pos = stop
+          when HT, LF, CR
+            yield scan_layout
+          when EM
+            yield Token.new(TokenType::EM, @pos, @pos + 1)
+            @pos += 1
+            @tail_start = @pos
+            return
+          when SOH then yield_code(TokenType::SOH) { |t| yield t }
+          when EOT then yield_code(TokenType::EOT) { |t| yield t }
+          when ENQ then yield_code(TokenType::ENQ) { |t| yield t }
+          when BEL then yield_code(TokenType::BEL) { |t| yield t }
+          when DLE then yield_code(TokenType::DLE) { |t| yield t }
+          when SYN then yield_code(TokenType::SYN) { |t| yield t }
+          when ETB then yield_code(TokenType::ETB) { |t| yield t }
+          when CAN then yield_code(TokenType::CAN) { |t| yield t }
+          when SUB then yield_code(TokenType::SUB) { |t| yield t }
+          when FS  then yield_code(TokenType::FS) { |t| yield t }
+          when GS  then yield_code(TokenType::GS) { |t| yield t }
+          when RS  then yield_code(TokenType::RS) { |t| yield t }
+          when US  then yield_code(TokenType::US) { |t| yield t }
+          else
+            raise UnassignedCodeError.new(byte, @pos)
+          end
+        elsif byte == SP
+          yield scan_layout
         else
           yield scan_data
         end
       end
+      @tail_start = @len
     end
 
-    # Collects all tokens into an array. Convenience method for
-    # non-streaming use. Prefer `each` for performance.
     def to_a : Array(Token)
       tokens = Array(Token).new
       each { |t| tokens << t }
       tokens
     end
 
-    # Scans a run of data bytes (>= 0x20). Returns a single Data token
-    # spanning the entire run.
+    # A plain run: bytes >= 0x20, ending before trailing spaces so that
+    # layout next to a code is its own token.
     @[AlwaysInline]
     private def scan_data : Token
       start = @pos
       ptr = @buf.to_unsafe
-
       @pos += 1
-      while @pos < @len
-        break if ptr[@pos] < 0x20_u8
+      while @pos < @len && ptr[@pos] >= 0x20_u8
         @pos += 1
       end
-
-      Token.new(TokenType::Data, start, @pos)
-    end
-
-    # Handles a control byte at the current position.
-    @[AlwaysInline]
-    private def handle_control(byte : UInt8, & : Token ->) : Nil
-      case byte
-      when C0::DLE
-        yield scan_escape
-      when C0::SOH then yield_control(TokenType::SOH) { |t| yield t }
-      when C0::STX then yield_control(TokenType::STX) { |t| yield t }
-      when C0::ETX then yield_control(TokenType::ETX) { |t| yield t }
-      when C0::EOT then yield_control(TokenType::EOT) { |t| yield t }
-      when C0::ENQ then yield_control(TokenType::ENQ) { |t| yield t }
-      when C0::ETB then yield_control(TokenType::ETB) { |t| yield t }
-      when C0::SUB then yield_control(TokenType::SUB) { |t| yield t }
-      when C0::FS  then yield_control(TokenType::FS)  { |t| yield t }
-      when C0::GS  then yield_control(TokenType::GS)  { |t| yield t }
-      when C0::RS  then yield_control(TokenType::RS)  { |t| yield t }
-      when C0::US  then yield_control(TokenType::US)  { |t| yield t }
-      else
-        raise UnassignedCodeError.new(byte, @pos)
+      stop = @pos
+      while stop > start + 1 && ptr[stop - 1] == SP
+        stop -= 1
       end
+      @pos = stop
+      Token.new(TokenType::Data, start, stop)
     end
 
-    # Emits a single-byte control token and advances position.
     @[AlwaysInline]
-    private def yield_control(type : TokenType, & : Token ->) : Nil
+    private def scan_layout : Token
+      start = @pos
+      @pos = Scan.layout(@buf, @pos)
+      Token.new(TokenType::Layout, start, @pos)
+    end
+
+    @[AlwaysInline]
+    private def yield_code(type : TokenType, & : Token ->) : Nil
       token = Token.new(type, @pos, @pos + 1)
       @pos += 1
       yield token
-    end
-
-    # Handles DLE escape: consumes DLE + next byte, emits a Data token
-    # for the escaped byte.
-    @[AlwaysInline]
-    private def scan_escape : Token
-      @pos += 1 # skip DLE
-      raise UnexpectedEndError.new if @pos >= @len
-
-      # The escaped byte is data, regardless of its value.
-      token = Token.new(TokenType::Data, @pos, @pos + 1)
-      @pos += 1
-      token
     end
   end
 end

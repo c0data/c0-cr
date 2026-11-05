@@ -1,226 +1,316 @@
 module C0
-  # Stream mode: ETB commits for append-only logs.
+  # Stream mode: ETB-committed append logs (DESIGN.md "Stream Mode").
   #
-  # C0DATA records are start-delimited, so a crashed append leaves a
-  # truncated final record that is indistinguishable from a complete one.
-  # In stream mode every appended block (one or more records, or an SOH
-  # header) is terminated by an ETB commit marker:
-  #
-  #   [RS]create[US]a1b2c3[ETB][RS]name[US]draft-2[ETB]
-  #
-  # A block is complete if and only if it is terminated by ETB.
-  # `Stream::Reader` exposes only committed data and reports any torn
-  # tail. `Stream::Writer` appends each block and its ETB as a single
-  # write, and repairs an uncommitted tail before appending — blind
-  # appends after a torn tail are unsafe (a tail ending in a bare DLE
-  # would escape the next append's RS and fuse two records).
+  #   C0::Stream::Writer.open("events.c0") do |w|
+  #     w.record("create", "a1b2", "1718208000")
+  #   end
+  #   r = C0::Stream::Reader.read("events.c0")
+  #   r.torn?          # => false
+  #   r.each_record { |rec| ... }
   module Stream
-    # Scans a buffer for ETB commit markers and exposes only the
-    # committed region. Zero-copy: all accessors return slices into
-    # the original buffer.
-    #
-    #   reader = C0::Stream::Reader.new(buf)
-    #   reader.torn?           # => true if an uncommitted tail trails
-    #   reader.each_record { |rec| ... }   # committed records only
+    # Scans a buffer for commits. An unescaped ETB is always a commit,
+    # even inside open text or a level; such a block is damaged and
+    # yields nothing. The tail after the last commit is torn unless it
+    # holds only layout, notes or EOT.
     struct Reader
       getter buf : Bytes
+      getter committed_end : Int32
+      getter blocks : Array({Int32, Int32})   # [start, end) of each committed block (ETB excluded)
+      getter damaged : Array(Int32)           # indexes of damaged blocks
+      getter? torn : Bool
 
       def initialize(@buf : Bytes)
-        @commits = Array({Int32, Int32}).new # {etb offset, end of payload}
+        @committed_end = 0
+        @blocks = Array({Int32, Int32}).new
+        @damaged = Array(Int32).new
+        @torn = false
         scan
       end
 
-      # Read a log file into a Reader.
       def self.read(path : Path | String) : Reader
-        new(File.open(path, &.getb_to_end))
+        new(File.read(path).to_slice)
       end
 
-      # Offset just past the last commit marker and its payload.
-      # Zero if the buffer contains no commits.
-      def committed_end : Int32
-        @commits.empty? ? 0 : @commits.last[1]
-      end
-
-      # The committed region of the buffer.
       def committed : Bytes
-        @buf[0, committed_end]
+        @buf[0...@committed_end]
       end
 
-      # Uncommitted trailing bytes — residue of an interrupted append.
       def tail : Bytes
-        @buf[committed_end..]
+        @buf[@committed_end...@buf.size]
       end
 
-      # True if uncommitted bytes trail the last commit marker.
-      def torn? : Bool
-        committed_end < @buf.size
-      end
-
-      # Number of committed blocks.
       def block_count : Int32
-        @commits.size
+        @blocks.size
       end
 
-      # Committed block by index: the bytes between the previous commit
-      # and this block's ETB (marker and payload excluded).
       def block(i : Int32) : Bytes
-        start = i == 0 ? 0 : @commits[i - 1][1]
-        @buf[start...@commits[i][0]]
+        s, e = @blocks[i]
+        @buf[s...e]
       end
 
-      # Iterate committed blocks.
+      def damaged?(i : Int32) : Bool
+        @damaged.includes?(i)
+      end
+
       def each_block(& : Bytes ->) : Nil
-        @commits.size.times { |i| yield block(i) }
+        @blocks.size.times { |i| yield block(i) }
       end
 
-      # The committed region as a Table (handles an optional GS name
-      # and SOH header, then RS records).
-      def table : Table
-        Table.new(committed)
+      # The committed region as a document (heading skipped), undamaged
+      # blocks only.
+      def document : Document
+        Document.new(undamaged_bytes)
       end
 
-      # Iterate committed records.
+      def body : Body
+        document.body
+      end
+
+      # Compatibility: the committed records as a group.
+      def table : Group
+        b = body
+        b.groups.first? || Group.new(Bytes.empty, 0, 0, 0, nil, Array(Record).new)
+      end
+
       def each_record(& : Record ->) : Nil
-        table.each_record { |r| yield r }
+        body.groups.each { |g| g.records.each { |r| yield r } }
       end
 
-      # Find every ETB at structural level: DLE-escaped bytes are data,
-      # and ETB inside an STX/ETX scope is record content, not a commit.
+      def records : Array(Record)
+        out = Array(Record).new
+        each_record { |r| out << r }
+        out
+      end
+
+      # Committed bytes with damaged blocks and payloads removed.
+      private def undamaged_bytes : Bytes
+        io = IO::Memory.new
+        @blocks.each_with_index do |(s, e), i|
+          next if @damaged.includes?(i)
+          io.write(@buf[s...e])
+        end
+        io.to_slice
+      end
+
       private def scan : Nil
-        pos = 0
-        len = @buf.size.to_i32
         ptr = @buf.to_unsafe
-
+        len = @buf.size.to_i32
+        pos = 0
+        block_start = 0
+        in_text = false
+        depth = 0
         while pos < len
-          byte = ptr[pos]
-          if byte == DLE
-            pos += 2
-          elsif byte == STX
-            pos = skip_nested(ptr, pos, len)
-          elsif byte == ETB
-            etb_pos = pos
-            pos += 1
-            # Payload runs until the next control code
-            while pos < len && ptr[pos] >= 0x20_u8
-              pos += 1
+          b = ptr[pos]
+          if in_text
+            if b == DLE
+              pos += 2
+              next
+            elsif b == ETX
+              in_text = false
+            elsif b == ETB
+              commit(block_start, pos, damaged: true)
+              pos = payload_end(pos + 1)
+              block_start = pos
+              in_text = false
+              depth = 0
+              next
+            elsif b == SYN || b == EOT || b == EM
+              # framing cuts the text; the block is torn/damaged at the next commit
+              in_text = false
+              depth = 0
+              if b == SYN
+                block_start = pos
+              end
             end
-            @commits << {etb_pos, pos}
+            pos += 1
           else
+            if b == STX
+              in_text = true
+            elsif b == DLE
+              depth += 1
+            elsif b == CAN
+              depth -= 1 if depth > 0
+            elsif b == ETB
+              commit(block_start, pos, damaged: depth > 0)
+              pos = payload_end(pos + 1)
+              block_start = pos
+              depth = 0
+              next
+            elsif b == SYN && pos > 0
+              # tears the uncommitted bytes before it; a new document begins
+              block_start = pos
+              depth = 0
+            end
             pos += 1
           end
         end
+        @torn = torn_tail?
       end
 
-      private def skip_nested(ptr : Pointer(UInt8), pos : Int32, stop : Int32) : Int32
-        pos += 1 # skip STX
-        depth = 1
-        while pos < stop && depth > 0
-          byte = ptr[pos]
-          if byte == STX
-            depth += 1
-          elsif byte == ETX
-            depth -= 1
-          elsif byte == DLE
-            pos += 1
+      private def commit(start : Int32, stop : Int32, damaged : Bool) : Nil
+        @blocks << {start, stop}
+        @damaged << (@blocks.size - 1) if damaged
+      end
+
+      # After an ETB: skip its payload and return committed_end (which
+      # excludes layout after the payload).
+      private def payload_end(pos : Int32) : Int32
+        ptr = @buf.to_unsafe
+        len = @buf.size.to_i32
+        p = Scan.layout(@buf, pos, len)
+        if p < len && ptr[p] >= 0x20_u8
+          while p < len && ptr[p] >= 0x20_u8
+            p += 1
           end
-          pos += 1
+          # trailing spaces of the payload are layout
+          while p > pos && ptr[p - 1] == SP
+            p -= 1
+          end
+        else
+          p = pos # no payload: layout after ETB belongs to the next block
         end
-        pos
+        @committed_end = p
+        p
+      end
+
+      # Is the tail more than layout, notes and EOT?
+      private def torn_tail? : Bool
+        ptr = @buf.to_unsafe
+        len = @buf.size.to_i32
+        pos = @committed_end
+        loop do
+          pos = Scan.layout(@buf, pos, len)
+          return false if pos >= len
+          b = ptr[pos]
+          if b == EOT
+            pos += 1
+          elsif b == BEL
+            p2 = Scan.layout(@buf, pos + 1, len)
+            return true if p2 < len && ptr[p2] < 0x20_u8 && ptr[p2] != STX # a dead element is data
+            begin
+              pos = Scan.comment(@buf, pos, len)
+            rescue Error
+              return true
+            end
+          else
+            return true
+          end
+        end
       end
     end
 
-    # Appends ETB-committed blocks to an append-only log.
-    #
-    #   C0::Stream::Writer.open("claims.c0") do |log|
-    #     log.record("create", nonce, ts)
-    #     log.batch do |b|
-    #       b.record("name", label, ts)
-    #       b.record("tag", tags, ts)
-    #     end
-    #   end
-    #
-    # Each block and its ETB are issued as a single write. `open` repairs
-    # a torn tail (truncates to the last commit) before appending.
+    # Appends committed blocks to an IO or file. Each `record`, `header`,
+    # `group` or `batch` is one block, written with its ETB in a single
+    # append.
     class Writer
-      # When true and the underlying IO is a File, fsync after each commit.
-      property sync : Bool
+      @io : IO
+      @sync : Bool
 
       def initialize(@io : IO, @sync : Bool = false)
       end
 
-      # Open a log file for appending, repairing any torn tail first.
       def self.open(path : Path | String, sync : Bool = true) : Writer
-        repair(path)
-        new(File.new(path, "a"), sync: sync)
+        repair(path) if File.exists?(path)
+        new(File.new(path, "a"), sync)
       end
 
       def self.open(path : Path | String, sync : Bool = true, & : Writer ->) : Nil
-        writer = open(path, sync)
+        w = open(path, sync)
         begin
-          yield writer
+          yield w
         ensure
-          writer.close
+          w.close
         end
       end
 
-      # Truncate an uncommitted tail so the log ends at a commit marker.
+      # Truncate an uncommitted tail so the file ends at a commit.
       def self.repair(path : Path | String) : Nil
-        return unless File.exists?(path)
-        reader = Reader.read(path)
-        if reader.torn?
-          File.open(path, "r+", &.truncate(reader.committed_end))
+        buf = File.read(path).to_slice
+        r = Reader.new(buf)
+        if r.torn?
+          File.open(path, "r+") { |f| f.truncate(r.committed_end) }
         end
       end
 
-      # Append one record as a committed block.
+      # A new log: SYN and heading, committed.
+      def start(pairs : Hash(String, String) = {"shape" => "stream"}) : Nil
+        commit { |b| b.syn(pairs) }
+      end
+
       def record(*fields : String) : Nil
         record(fields)
       end
 
-      # :ditto:
       def record(fields : Indexable(String)) : Nil
         commit { |b| b.record(fields) }
       end
 
-      # Append an SOH header as a committed block.
+      def map(pairs : Hash(String, String)) : Nil
+        commit { |b| b.map(pairs) }
+      end
+
       def header(*names : String) : Nil
         header(names)
       end
 
-      # :ditto:
       def header(names : Indexable(String)) : Nil
         commit { |b| b.header(names) }
       end
 
-      # Append a group preamble (GS + name) as a committed block.
       def group(name : String, headers : Indexable(String)? = nil) : Nil
         commit { |b| b.group(name, headers) }
       end
 
-      # Append several records under a single commit. The batch is
-      # atomic: a tear anywhere inside it discards the whole block.
+      # Several writes under one ETB: atomic as a batch.
       def batch(& : Builder ->) : Nil
         commit { |b| yield b }
       end
 
       def flush : Nil
         @io.flush
+        if @sync && (f = @io).is_a?(File)
+          f.fsync
+        end
       end
 
       def close : Nil
+        flush
         @io.close
       end
 
       private def commit(& : Builder ->) : Nil
-        builder = Builder.new
-        yield builder
-        builder.etb
-        @io.write(builder.to_slice)
-        @io.flush
-        if @sync && (io = @io).is_a?(File)
-          io.fsync
-        end
+        b = Builder.new
+        yield b
+        b.etb
+        @io.write(b.to_slice)
+        flush
       end
+    end
+
+    # Position just past the last commit, found by scanning backward.
+    def self.last_commit_end(buf : Bytes) : Int32
+      ptr = buf.to_unsafe
+      i = buf.size - 1
+      while i >= 0
+        if ptr[i] == ETB
+          # count the DLE run before it: odd means escaped
+          dles = 0
+          j = i - 1
+          while j >= 0 && ptr[j] == DLE
+            dles += 1
+            j -= 1
+          end
+          if dles.even?
+            p = i + 1
+            while p < buf.size && ptr[p] >= 0x20_u8
+              p += 1
+            end
+            return p
+          end
+        end
+        i -= 1
+      end
+      0
     end
   end
 end

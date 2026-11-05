@@ -1,165 +1,207 @@
 module C0
-  # Zero-copy navigator for a full C0DATA document.
-  #
-  # Walks an entire buffer containing FS/GS/RS/US structure and provides
-  # access to files, groups, records, and fields as slices into the
-  # original buffer.
-  #
-  # Example:
-  #   doc = C0::Document.new(buf)
-  #   doc.name                     # => "mydb"
-  #   doc.groups.size              # => 2
-  #   doc.group("users")           # => Group
-  #   doc.group("users").table     # => Table
-  #   doc["users"]                 # => Group (shortcut)
+  # The heading of a document: keyed units after SYN. Last wins for
+  # duplicate keys.
+  struct Heading
+    getter pairs : Array({Bytes, Bytes})
+    getter raw : Bytes
+
+    def initialize(@raw : Bytes, @pairs : Array({Bytes, Bytes}))
+    end
+
+    def self.empty : Heading
+      new(Bytes.empty, Array({Bytes, Bytes}).new)
+    end
+
+    def [](key : String) : Bytes?
+      found = nil
+      @pairs.each { |k, v| found = v if k == key.to_slice }
+      found
+    end
+
+    def keys : Array(Bytes)
+      @pairs.map(&.[0])
+    end
+
+    def shape : String?
+      self["shape"].try { |v| String.new(v) }
+    end
+
+    def version : Int32
+      self["version"].try { |v| String.new(v).to_i? } || 1
+    end
+
+    # The blob table as a Body, when declared.
+    def blob : Body?
+      raw_blob.try { |r| Body.new(r, 1, Scan.level(r, 0) - 1) }
+    end
+
+    # Raw unit of the blob key (a level), or nil.
+    def raw_blob : Bytes?
+      found = nil
+      @pairs_raw.try &.each { |k, v| found = v if k == "blob".to_slice }
+      found
+    end
+
+    @pairs_raw : Array({Bytes, Bytes})? = nil
+
+    protected def pairs_raw=(v : Array({Bytes, Bytes}))
+      @pairs_raw = v
+    end
+
+    def empty? : Bool
+      @pairs.empty?
+    end
+  end
+
+  # One C0DATA document: an optional SYN heading, a body, an optional EOT.
+  # `Document.new(buf)` reads the first document in the buffer. Use
+  # `Container` for a buffer holding several documents or an EM tail.
   struct Document
-    @buf : Bytes
-    @name_start : Int32
-    @name_end : Int32
-    @group_offsets : Array(Int32) # start offset of each GS
-    @group_names : Array({Int32, Int32})
+    getter buf : Bytes
+    getter heading : Heading
+    getter body : Body
+    getter start : Int32
+    getter stop : Int32 # position after EOT (or end of document)
+    getter? has_syn : Bool
+    getter? has_eot : Bool
+    getter warnings : Array(String)
 
-    def initialize(@buf : Bytes)
-      @name_start = 0
-      @name_end = 0
-      @group_offsets = Array(Int32).new
-      @group_names = Array({Int32, Int32}).new
-      index
-    end
-
-    # Document/file name (text after FS). Empty if no FS present.
-    def name : Bytes
-      @buf[@name_start...@name_end]
-    end
-
-    # Number of top-level groups.
-    def group_count : Int32
-      @group_offsets.size
-    end
-
-    # Access a group by index.
-    def group(i : Int32) : Group
-      gs_start = @group_offsets[i]
-      gs_end = if i + 1 < @group_offsets.size
-                 @group_offsets[i + 1]
-               else
-                 find_end(gs_start)
-               end
-      Group.new(@buf, gs_start, gs_end)
-    end
-
-    # Access a group by name.
-    def group(name : String) : Group
-      @group_names.each_with_index do |(ns, ne), i|
-        if @buf[ns...ne] == name.to_slice
-          return group(i)
-        end
+    def initialize(@buf : Bytes, @start : Int32 = 0)
+      @warnings = Array(String).new
+      ptr = @buf.to_unsafe
+      len = @buf.size.to_i32
+      pos = Scan.layout(@buf, @start, len)
+      @has_syn = pos < len && ptr[pos] == SYN
+      if @has_syn
+        pos += 1
+        @heading, pos = Document.parse_heading(@buf, pos, len)
+      else
+        @warnings << "no SYN at the start of the document"
+        @heading = Heading.empty
       end
-      raise KeyError.new("No group named '#{name}'")
+      body_start = pos
+      body_end = Document.find_body_end(@buf, pos, len)
+      @body = Body.new(@buf, body_start, body_end)
+      pos = Scan.layout(@buf, body_end, len)
+      @has_eot = pos < len && ptr[pos] == EOT
+      if @has_eot
+        pos += 1
+      elsif @heading.shape != "stream"
+        @warnings << "no EOT at the end of the document"
+      end
+      @stop = pos
+      @heading.keys.each do |k|
+        s = String.new(k)
+        @warnings << "unknown heading key '#{s}'" unless s == "shape" || s == "version" || s == "blob"
+      end
     end
 
-    # Shortcut for group by name.
+    # Convenience accessors over the body.
+    def name : Bytes
+      @body.name
+    end
+
+    def files : Array(FileView)
+      @body.files
+    end
+
+    def group_count : Int32
+      @body.group_count
+    end
+
+    def group(i : Int32) : Group
+      @body.group(i)
+    end
+
+    def group(name : String) : Group
+      @body.group(name)
+    end
+
     def [](name : String) : Group
       group(name)
     end
 
-    # Shortcut for group by index.
     def [](i : Int32) : Group
       group(i)
     end
 
-    # Iterate all groups.
     def each_group(& : Group ->) : Nil
-      group_count.times { |i| yield group(i) }
+      @body.each_group { |g| yield g }
     end
 
-    # All group names.
+    def groups : Array(Group)
+      @body.groups
+    end
+
     def group_names : Array(Bytes)
-      @group_names.map { |(ns, ne)| @buf[ns...ne] }
+      @body.group_names
     end
 
-    private def index : Nil
-      pos = 0
-      len = @buf.size.to_i32
-      ptr = @buf.to_unsafe
+    def records : Array(Record)
+      @body.records
+    end
 
-      # Skip FS + file name if present
-      if pos < len && ptr[pos] == FS
-        pos += 1
-        @name_start = pos
-        while pos < len && ptr[pos] >= 0x20_u8
-          pos += 1
-        end
-        @name_end = pos
-      end
+    def shape : String?
+      @heading.shape
+    end
 
-      # Find all top-level GS groups
-      while pos < len
-        byte = ptr[pos]
-        break if byte == EOT
+    def raw : Bytes
+      @buf[@start...@stop]
+    end
 
-        if byte == GS
-          # Check if this is a top-level GS (single, not GS×N continuation)
-          gs_pos = pos
-          gs_count = 0
-          while pos < len && ptr[pos] == GS
-            gs_count += 1
-            pos += 1
-          end
-
-          if gs_count == 1
-            # Top-level group
-            @group_offsets << gs_pos
-            name_start = pos
-            while pos < len && ptr[pos] >= 0x20_u8
-              pos += 1
-            end
-            @group_names << {name_start, pos}
-          else
-            # Deeper section (GS×N) — skip past its name
-            while pos < len && ptr[pos] >= 0x20_u8
-              pos += 1
-            end
-          end
+    # Parse keyed units after SYN. Returns {heading, position of first body code}.
+    protected def self.parse_heading(buf : Bytes, pos : Int32, len : Int32) : {Heading, Int32}
+      ptr = buf.to_unsafe
+      hs = pos
+      pairs = Array({Bytes, Bytes}).new
+      raw_pairs = Array({Bytes, Bytes}).new
+      loop do
+        pos = Scan.layout(buf, pos, len)
+        break if pos >= len
+        b = ptr[pos]
+        if b == SOH
+          p2 = Scan.layout(buf, pos + 1, len)
+          break if p2 < len && ptr[p2] == RS
+          ks = p2
+          ke = Scan.plain(buf, ks, len)
+          raise SyntaxError.new("key without a value (no US)", ke) unless ke < len && ptr[ke] == US
+          vs = ke + 1
+          ve = Scan.unit(buf, vs, len)
+          key = C0.trim(buf[ks...ke])
+          rawv = C0.trim(buf[vs...ve])
+          raise SyntaxError.new("reference in a heading", vs) if rawv.size > 0 && rawv[0] == ENQ
+          raw_pairs << {key, rawv}
+          pairs << {key, rawv.size > 0 && rawv[0] == DLE ? rawv : C0.value(rawv)}
+          pos = ve
+        elsif b == BEL
+          pos = Scan.comment(buf, pos, len)
+        elsif b >= 0x20_u8
+          raise SyntaxError.new("plain text directly after SYN", pos)
         else
-          pos += 1
+          break
         end
       end
+      h = Heading.new(buf[hs...pos], pairs)
+      h.pairs_raw = raw_pairs
+      {h, pos}
     end
 
-    # Find the end of a group starting at gs_start.
-    private def find_end(gs_start : Int32) : Int32
-      pos = gs_start
-      len = @buf.size.to_i32
-      ptr = @buf.to_unsafe
-
-      # Skip past the initial GS + name
-      pos += 1
-      while pos < len && ptr[pos] >= 0x20_u8
-        pos += 1
-      end
-
-      # Scan until next top-level GS, FS, or EOT
+    # Scan from the start of a body to its end: EOT, SYN, EM or end of input
+    # at depth zero, skipping text and levels.
+    protected def self.find_body_end(buf : Bytes, pos : Int32, len : Int32) : Int32
+      ptr = buf.to_unsafe
       while pos < len
-        byte = ptr[pos]
-        break if byte == FS || byte == EOT
-
-        if byte == GS
-          # Check if it's a single GS (top-level) or GS×N (nested)
-          count = 0
-          peek = pos
-          while peek < len && ptr[peek] == GS
-            count += 1
-            peek += 1
-          end
-          break if count == 1 # next top-level group
-          pos = peek          # skip deeper section
-          # Skip name
-          while pos < len && ptr[pos] >= 0x20_u8
-            pos += 1
-          end
-        elsif byte == DLE
-          pos += 2
+        b = ptr[pos]
+        if b >= 0x20_u8
+          pos += 1
+        elsif b == STX
+          pos = Scan.text(buf, pos, len)
+        elsif b == DLE
+          pos = Scan.level(buf, pos, len)
+        elsif b == EOT || b == SYN || b == EM
+          return pos
+        elsif b == CAN
+          raise SyntaxError.new("CAN with no open level", pos)
         else
           pos += 1
         end
@@ -168,61 +210,62 @@ module C0
     end
   end
 
-  # A group within a document. Can be accessed as a Table or iterated
-  # for document-mode content.
-  struct Group
-    @buf : Bytes
-    @start : Int32 # offset of the GS byte
-    @end : Int32   # offset past the last byte of this group
+  # A file or message: one or more documents and an optional raw tail
+  # after EM.
+  struct Container
+    getter documents : Array(Document)
+    getter tail : Bytes
+    getter? has_em : Bool
 
-    def initialize(@buf : Bytes, @start : Int32, @end : Int32)
-    end
-
-    # Group name.
-    def name : Bytes
-      pos = @start + 1 # skip GS
-      ptr = @buf.to_unsafe
-      name_start = pos
-      while pos < @end && ptr[pos] >= 0x20_u8
-        pos += 1
+    def initialize(buf : Bytes)
+      @documents = Array(Document).new
+      @tail = Bytes.empty
+      @has_em = false
+      ptr = buf.to_unsafe
+      len = buf.size.to_i32
+      pos = Scan.layout(buf, 0, len)
+      while pos < len
+        if ptr[pos] == EM
+          @has_em = true
+          @tail = buf[(pos + 1)...len]
+          break
+        end
+        doc = Document.new(buf, pos)
+        @documents << doc
+        pos = Scan.layout(buf, doc.stop, len)
+        if pos < len && ptr[pos] != SYN && ptr[pos] != EM
+          raise SyntaxError.new("unexpected byte after EOT", pos)
+        end
       end
-      @buf[name_start...pos]
     end
 
-    # Access as a Table (for tabular/key-value data).
-    def table : Table
-      Table.new(@buf, @start)
+    def first : Document
+      @documents[0]
     end
 
-    # Check if this group has an SOH header.
-    def has_header? : Bool
-      pos = @start + 1
-      ptr = @buf.to_unsafe
-      # Skip name
-      while pos < @end && ptr[pos] >= 0x20_u8
-        pos += 1
+    # The blob table from the first document's heading.
+    def blob : Body?
+      @documents[0]?.try(&.heading.blob)
+    end
+
+    # Bytes of a named blob from the tail, or nil.
+    def blob(name : String) : Bytes?
+      table = blob
+      return nil unless table
+      recs = table.records
+      recs = table.groups.first.records if recs.empty? && !table.groups.empty?
+      g = table.groups.first? || return nil
+      ni = g.column("name") || 0
+      oi = g.column("offset") || 1
+      li = g.column("length") || 2
+      found = nil
+      g.records.each do |r|
+        next unless r.value(ni) == name.to_slice
+        off = String.new(r.value(oi)).to_i
+        length = String.new(r.value(li)).to_i
+        found = @tail[off, length]
       end
-      pos < @end && ptr[pos] == SOH
-    end
-
-    # Iterate records directly (convenience for key-value groups).
-    def each_record(& : Record ->) : Nil
-      table.each_record { |r| yield r }
-    end
-
-    # Access record by index.
-    def record(i : Int32) : Record
-      table.record(i)
-    end
-
-    # Number of records.
-    def record_count : Int32
-      table.record_count
-    end
-
-    # Raw bytes of this group.
-    def raw : Bytes
-      @buf[@start...@end]
+      found
     end
   end
 end
