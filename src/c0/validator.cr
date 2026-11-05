@@ -49,23 +49,30 @@ module C0
       ptr = @buf.to_unsafe
       pos = 0
       pos = layout(pos)
+      first = true
       while pos < @len
         byte = ptr[pos]
         if byte == SYN
           not_canonical("SYN in a canonical unit")
           pos = heading(pos + 1)
+          first = true # the body that follows belongs to this document
         elsif byte == EM
           not_canonical("EM in a canonical unit")
           return # raw region follows
         else
+          raise SyntaxError.new("a document after the first must begin with SYN", pos) unless first
           pos = body(pos, @len, depth0: true)
           # after a body only EOT, SYN, EM or end
           pos = layout(pos)
+          first = false
           if pos < @len
             b = ptr[pos]
             if b == EOT
               not_canonical("EOT in a canonical unit")
               pos = layout(pos + 1)
+              if pos < @len && ptr[pos] != SYN && ptr[pos] != EM
+                raise SyntaxError.new("unexpected byte after EOT", pos)
+              end
             elsif b == SYN || b == EM
               next
             else
@@ -148,7 +155,7 @@ module C0
     # part = *note [header-row] *item *group
     private def part(pos : Int32, stop : Int32, depth0 : Bool) : Int32
       ptr = @buf.to_unsafe
-      pos = notes(pos, stop)
+      pos = pre(pos, stop, depth0)
       pos = header_row?(pos, stop)
       pos = items(pos, stop, depth0)
       while pos < stop
@@ -176,9 +183,58 @@ module C0
         pos = layout(pos + 1, stop)
       end
       pos = plain_name(pos, stop)
-      pos = notes(pos, stop)
+      pos = pre(pos, stop, depth0)
       pos = header_row?(pos, stop)
       items(pos, stop, depth0)
+    end
+
+    # Before a header row: notes, commits (at depth zero), dead records and
+    # dead header rows.
+    private def pre(pos : Int32, stop : Int32, depth0 : Bool) : Int32
+      ptr = @buf.to_unsafe
+      loop do
+        pos = layout(pos, stop)
+        break if pos >= stop
+        b = ptr[pos]
+        if b == ETB
+          raise SyntaxError.new("commit inside a nested level", pos) unless depth0
+          not_canonical("commit")
+          pos = Scan.plain(@buf, layout(pos + 1, stop), stop)
+        elsif b == BEL
+          p2 = Scan.layout(@buf, pos + 1, stop)
+          raise UnexpectedEndError.new("BEL at end of input", p2) if p2 >= stop
+          if ptr[p2] >= 0x20_u8 || ptr[p2] == STX
+            pos = notes(pos, stop)
+          elsif ptr[p2] == RS
+            not_canonical("dead element")
+            pos = record(p2 + 1, stop)
+          elsif ptr[p2] == SOH
+            p3 = Scan.layout(@buf, p2 + 1, stop)
+            if p3 < stop && ptr[p3] == RS
+              not_canonical("dead element")
+              pos = header_names(p3 + 1, stop)
+            else
+              raise SyntaxError.new("keyed unit outside a record", p2)
+            end
+          else
+            break
+          end
+        else
+          break
+        end
+      end
+      pos
+    end
+
+    private def header_names(pos : Int32, stop : Int32) : Int32
+      ptr = @buf.to_unsafe
+      pos = layout(pos, stop)
+      loop do
+        pos = plain_name(pos, stop)
+        break unless pos < stop && ptr[pos] == US
+        pos = layout(pos + 1, stop)
+      end
+      pos
     end
 
     # Notes only (BEL followed by plain/text); dead elements are handled
@@ -189,7 +245,8 @@ module C0
         pos = layout(pos, stop)
         break unless pos < stop && ptr[pos] == BEL
         p2 = Scan.layout(@buf, pos + 1, stop)
-        break if p2 < stop && ptr[p2] < 0x20_u8 # a dead element, not a note
+        raise UnexpectedEndError.new("BEL at end of input", p2) if p2 >= stop
+        break if ptr[p2] < 0x20_u8 && ptr[p2] != STX # a dead element, not a note
         not_canonical("comment")
         pos = p2 < stop ? Scan.plain(@buf, p2, stop) : p2
         if p2 < stop && ptr[p2] == STX
@@ -202,29 +259,10 @@ module C0
     private def header_row?(pos : Int32, stop : Int32) : Int32
       ptr = @buf.to_unsafe
       pos = layout(pos, stop)
-      p = pos
-      dead = false
-      if p < stop && ptr[p] == BEL
-        p2 = Scan.layout(@buf, p + 1, stop)
-        if p2 < stop && ptr[p2] == SOH
-          p3 = Scan.layout(@buf, p2 + 1, stop)
-          if p3 < stop && ptr[p3] == RS
-            dead = true
-            p = p2
-          end
-        end
-      end
-      return pos unless p < stop && ptr[p] == SOH
-      p2 = layout(p + 1, stop)
+      return pos unless pos < stop && ptr[pos] == SOH
+      p2 = layout(pos + 1, stop)
       return pos unless p2 < stop && ptr[p2] == RS
-      not_canonical("dead element") if dead
-      pos = layout(p2 + 1, stop)
-      loop do
-        pos = plain_name(pos, stop)
-        break unless pos < stop && ptr[pos] == US
-        pos = layout(pos + 1, stop)
-      end
-      pos
+      header_names(p2 + 1, stop)
     end
 
     private def items(pos : Int32, stop : Int32, depth0 : Bool) : Int32
@@ -248,8 +286,12 @@ module C0
             pos = record(p2 + 1, stop)
           elsif ptr[p2] == SOH
             p3 = Scan.layout(@buf, p2 + 1, stop)
-            raise SyntaxError.new("header row not at the start of its group", p2) if p3 < stop && ptr[p3] == RS
-            raise SyntaxError.new("keyed unit outside a record", p2)
+            if p3 < stop && ptr[p3] == RS
+              not_canonical("dead element")
+              pos = header_names(p3 + 1, stop)
+            else
+              raise SyntaxError.new("keyed unit outside a record", p2)
+            end
           elsif ptr[p2] == DLE
             raise SyntaxError.new("a nested level is not an item", p2)
           else
@@ -270,21 +312,32 @@ module C0
     private def record(pos : Int32, stop : Int32) : Int32
       ptr = @buf.to_unsafe
       pos = layout(pos, stop)
-      if pos < stop && ptr[pos] == SOH
+      if keyed_start?(pos, stop)
         keys = Array(Bytes).new
-        while pos < stop && ptr[pos] == SOH
-          k, _v, pos = keyed_unit(pos + 1, stop, heading: false)
-          keys << k
+        loop do
           pos = layout(pos, stop)
-          if pos < stop && ptr[pos] == BEL
+          break if pos >= stop
+          b = ptr[pos]
+          if b == SOH
             p2 = Scan.layout(@buf, pos + 1, stop)
-            if p2 < stop && ptr[p2] == SOH
+            break if p2 < stop && ptr[p2] == RS
+            k, _v, pos = keyed_unit(pos + 1, stop, heading: false)
+            keys << k
+          elsif b == BEL
+            p2 = Scan.layout(@buf, pos + 1, stop)
+            raise UnexpectedEndError.new("BEL at end of input", p2) if p2 >= stop
+            if ptr[p2] == SOH
               p3 = Scan.layout(@buf, p2 + 1, stop)
               break if p3 < stop && ptr[p3] == RS
               not_canonical("dead element")
               _k, _v, pos = keyed_unit(p2 + 1, stop, heading: false)
-              pos = layout(pos, stop)
+            elsif ptr[p2] >= 0x20_u8 || ptr[p2] == STX
+              pos = notes(pos, stop)
+            else
+              break
             end
+          else
+            break
           end
         end
         check_keys(keys)
@@ -308,6 +361,22 @@ module C0
         end
       end
       pos
+    end
+
+    # Does a record starting here begin with a (live or dead) keyed unit?
+    private def keyed_start?(pos : Int32, stop : Int32) : Bool
+      ptr = @buf.to_unsafe
+      while pos < stop
+        b = ptr[pos]
+        return true if b == SOH
+        return false unless b == BEL
+        p2 = Scan.layout(@buf, pos + 1, stop)
+        return false if p2 >= stop
+        return true if ptr[p2] == SOH
+        return false if ptr[p2] < 0x20_u8 && ptr[p2] != STX
+        pos = Scan.layout(@buf, Scan.comment(@buf, pos, stop), stop)
+      end
+      false
     end
 
     # After SOH. Returns {key, value-or-empty, pos}.
@@ -340,8 +409,8 @@ module C0
           i += 1
         end
         not_canonical("layout bytes") if C0.layout?(v[v.size - 1])
-        after = layout(pos, stop)
-        raise SyntaxError.new("two values in one unit", after) if after < stop && (ptr[after] == STX || ptr[after] == DLE || ptr[after] == ENQ)
+        after = trailing_notes(layout(pos, stop), stop)
+        raise SyntaxError.new("two values in one unit", after) if after < stop && (ptr[after] == STX || ptr[after] == DLE || ptr[after] == ENQ || ptr[after] >= 0x20_u8)
         return after
       elsif b == STX
         start = pos
@@ -351,12 +420,12 @@ module C0
           not_canonical("empty text") if inside.size == 0
           not_canonical("gratuitous text") if inside.size > 0 && C0.plain?(C0.decode_text(inside))
         end
-        after = layout(pos, stop)
+        after = trailing_notes(layout(pos, stop), stop)
         raise SyntaxError.new("two values in one unit", after) if after < stop && (ptr[after] >= 0x20_u8 || ptr[after] == STX || ptr[after] == DLE || ptr[after] == ENQ)
         return after
       elsif b == DLE
         pos = level(pos, stop)
-        after = layout(pos, stop)
+        after = trailing_notes(layout(pos, stop), stop)
         raise SyntaxError.new("two values in one unit", after) if after < stop && (ptr[after] >= 0x20_u8 || ptr[after] == STX || ptr[after] == DLE || ptr[after] == ENQ)
         return after
       elsif b == ENQ
@@ -374,11 +443,12 @@ module C0
         else
           pos = Scan.plain(@buf, pos, stop)
         end
-        return layout(pos, stop)
+        return trailing_notes(layout(pos, stop), stop)
       elsif b == BEL
         # a note or dead level in unit position: the unit is empty
         p2 = Scan.layout(@buf, pos + 1, stop)
-        if p2 < stop && ptr[p2] == DLE
+        raise UnexpectedEndError.new("BEL at end of input", p2) if p2 >= stop
+        if ptr[p2] == DLE
           not_canonical("dead element")
           pos = level(p2, stop)
         elsif p2 < stop && ptr[p2] < 0x20_u8 && ptr[p2] != STX
@@ -391,6 +461,21 @@ module C0
       else
         return pos
       end
+    end
+
+    # Notes (BEL + content) after a value inside a unit; a BEL before a code
+    # is left for the caller.
+    private def trailing_notes(pos : Int32, stop : Int32) : Int32
+      ptr = @buf.to_unsafe
+      while pos < stop && ptr[pos] == BEL
+        p2 = Scan.layout(@buf, pos + 1, stop)
+        raise UnexpectedEndError.new("BEL at end of input", p2) if p2 >= stop
+        break unless ptr[p2] >= 0x20_u8 || ptr[p2] == STX
+        not_canonical("comment")
+        pos = ptr[p2] == STX ? Scan.text(@buf, p2, stop) : Scan.plain(@buf, p2, stop)
+        pos = layout(pos, stop)
+      end
+      pos
     end
 
     private def split_us(bytes : Bytes) : Array(Bytes)
@@ -461,6 +546,9 @@ module C0
           else
             pos = notes(pos, stop)
           end
+        elsif b == ETB
+          not_canonical("commit")
+          pos = Scan.plain(@buf, layout(pos + 1, stop), stop)
         elsif b == EOT || b == SYN || b == EM
           break
         else
@@ -490,6 +578,7 @@ module C0
         if pos < stop && ptr[pos] == SUB
           pos = dvalue(pos + 1, stop)
         end
+        pos = trailing_notes(pos, stop)
         break unless pos < stop && ptr[pos] == US
         pos += 1
       end

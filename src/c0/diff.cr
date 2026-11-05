@@ -1,406 +1,376 @@
 module C0
-  # C0DIFF parser and applier for atomic multi-file edits.
+  # C0-DIFF: atomic multi-file edits with anchored patterns (DIFF.md).
   #
-  # Format:
-  #   [FS]<filepath>[GS]<literal>[US]<old>[SUB]<new>[US]<literal>
-  #
-  # - FS starts a new file block
-  # - GS starts a new pattern section within a file
-  # - US separates pattern units (anchor text ↔ replacement regions)
-  # - SUB separates old text from new text within a replacement
-  # - DLE escapes literal control codes
-  #
-  # TODO: Consider a "replace-all within bounded scope" mode.
-  #   Two unique sentinel anchors would define a region, and all
-  #   occurrences within that region would be replaced. Candidate
-  #   codes: SO/SI (0x0E/0x0F) — "Shift Out/In" to switch into
-  #   replace-all mode:
-  #     [GS]<start anchor>[SO]<old>[SUB]<new>[SI]<end anchor>
-  #   Open questions:
-  #   - Is this too liberal? Should there be a max replacement count?
-  #   - Or is it better to generate one section per occurrence at
-  #     a higher tool level, keeping the format strictly exact-match?
-  #   - Could also be useful for batch renames (variable/method renaming
-  #     within a function scope).
+  #   diff = C0::Diff.build do |d|
+  #     d.file("greeting.txt") do
+  #       d.section { |s| s.anchor("Hello "); s.sub("world", "universe"); s.anchor("!") }
+  #     end
+  #     d.file("tally.rb") do
+  #       d.section { |s| s.anchor("def tally(items)") }
+  #       d.replace_all("count", "total")
+  #       d.section { |s| s.anchor("end") }
+  #     end
+  #   end
+  #   C0::Diff.apply(diff, {"greeting.txt" => "Hello world!"})
   module Diff
-    # A single substitution: old text → new text.
-    record Sub, old : Bytes, new : Bytes
+    class Error < C0::Error; end
 
-    # A pattern unit: either literal anchor text or a substitution.
-    alias Unit = Bytes | Sub
+    # One unit of a pattern: an anchor (new is nil) or a substitution.
+    struct Unit
+      getter old : Bytes
+      getter new : Bytes?
 
-    # A section is a sequential pattern of units (anchors + substitutions).
+      def initialize(@old : Bytes, @new : Bytes?)
+      end
+
+      def anchor? : Bool
+        @new.nil?
+      end
+    end
+
+    # A section: one anchored pattern, plus the replace-alls that follow it.
     struct Section
       getter units : Array(Unit)
+      getter replaces : Array({Bytes, Bytes})
 
-      def initialize(@units)
+      def initialize(@units : Array(Unit), @replaces = Array({Bytes, Bytes}).new)
       end
 
-      # Build the search pattern (old text concatenated).
-      def search_pattern : Bytes
+      def search : Bytes
         io = IO::Memory.new
-        @units.each do |unit|
-          case unit
-          when Bytes then io.write(unit)
-          when Sub   then io.write(unit.old)
-          end
-        end
+        @units.each { |u| io.write(u.old) }
         io.to_slice
       end
 
-      # Build the replacement (new text concatenated).
       def replacement : Bytes
         io = IO::Memory.new
-        @units.each do |unit|
-          case unit
-          when Bytes then io.write(unit)
-          when Sub   then io.write(unit.new)
-          end
-        end
+        @units.each { |u| io.write(u.new || u.old) }
         io.to_slice
       end
     end
 
-    # A file edit: a file path and its sections.
+    # A file's edits: replace-alls before any section apply to the whole
+    # file (up to the first match).
     struct FileEdit
-      getter path : Bytes
+      getter path : String
+      getter leading_replaces : Array({Bytes, Bytes})
       getter sections : Array(Section)
 
-      def initialize(@path, @sections)
+      def initialize(@path : String, @leading_replaces : Array({Bytes, Bytes}), @sections : Array(Section))
       end
     end
 
-    # Parse a C0DIFF buffer into a list of file edits.
+    # Parse a diff document (with or without its SYN heading).
     def self.parse(buf : Bytes) : Array(FileEdit)
-      edits = Array(FileEdit).new
-      pos = 0
-      len = buf.size.to_i32
       ptr = buf.to_unsafe
-
-      while pos < len
-        byte = ptr[pos]
-        break if byte == EOT
-
-        if byte == FS
-          pos += 1
-          edit = parse_file(buf, pos) { |new_pos| pos = new_pos }
-          edits << edit
-        else
-          pos += 1
+      len = buf.size.to_i32
+      pos = Scan.layout(buf, 0, len)
+      if pos < len && ptr[pos] == SYN
+        heading, pos = Document.parse_heading(buf, pos + 1, len)
+        if (shape = heading.shape) && shape != "diff"
+          raise Error.new("heading declares shape '#{shape}', not diff")
         end
       end
-
-      edits
-    end
-
-    # Parse a C0DIFF buffer into a list of file edits.
-    def self.parse(buf : Bytes) : Array(FileEdit)
-      edits = Array(FileEdit).new
-      pos = 0
-      len = buf.size.to_i32
-      ptr = buf.to_unsafe
-
-      while pos < len
-        byte = ptr[pos]
-        break if byte == EOT
-
-        if byte == FS
-          pos += 1
-          edit, pos = parse_file_at(buf, pos)
-          edits << edit
-        else
-          pos += 1
+      files = Array(FileEdit).new
+      path = nil
+      leading = Array({Bytes, Bytes}).new
+      sections = Array(Section).new
+      flush = ->{
+        if p = path
+          files << FileEdit.new(p, leading, sections)
         end
-      end
-
-      edits
-    end
-
-    # Apply a C0DIFF buffer to a hash of file contents.
-    # Returns the modified file contents. Raises on validation failure.
-    # All files are validated before any modifications (atomic semantics).
-    def self.apply(diff_buf : Bytes, files : Hash(String, String)) : Hash(String, String)
-      edits = parse(diff_buf)
-      results = Hash(String, String).new
-
-      # Validate all edits first
-      edits.each do |edit|
-        path = String.new(edit.path)
-        content = files[path]? || raise Error.new("File not found: #{path}")
-
-        # Validate each section's search pattern exists exactly once
-        edit.sections.each_with_index do |section, i|
-          pattern = String.new(section.search_pattern)
-          count = count_occurrences(content, pattern)
-          if count == 0
-            raise Error.new("Pattern not found in #{path} (section #{i}): #{pattern.inspect}")
-          elsif count > 1
-            raise Error.new("Pattern found #{count} times in #{path} (section #{i}), expected exactly 1: #{pattern.inspect}")
+        leading = Array({Bytes, Bytes}).new
+        sections = Array(Section).new
+      }
+      while pos < len
+        pos = Scan.layout(buf, pos, len)
+        break if pos >= len
+        b = ptr[pos]
+        dead = false
+        if b == BEL
+          p2 = Scan.layout(buf, pos + 1, len)
+          if p2 < len && (ptr[p2] == FS || ptr[p2] == GS || ptr[p2] == RS)
+            dead = true
+            pos = p2
+            b = ptr[pos]
+          else
+            pos = Scan.comment(buf, pos, len) # a note
+            next
           end
         end
-      end
-
-      # Apply all edits
-      edits.each do |edit|
-        path = String.new(edit.path)
-        content = files[path]
-
-        edit.sections.each do |section|
-          pattern = String.new(section.search_pattern)
-          replacement = String.new(section.replacement)
-          content = content.sub(pattern, replacement)
-        end
-
-        results[path] = content
-      end
-
-      # Include unmodified files
-      files.each do |path, content|
-        results[path] = content unless results.has_key?(path)
-      end
-
-      results
-    end
-
-    # Apply a C0DIFF buffer to files on disk.
-    # Validates all files before writing any (atomic semantics).
-    def self.apply_files(diff_buf : Bytes, base_dir : String = ".") : Nil
-      edits = parse(diff_buf)
-
-      # Read all files and validate
-      files = Hash(String, String).new
-      edits.each do |edit|
-        path = File.join(base_dir, String.new(edit.path))
-        unless File.exists?(path)
-          raise Error.new("File not found: #{path}")
-        end
-        files[String.new(edit.path)] = File.read(path)
-      end
-
-      results = apply(diff_buf, files)
-
-      # Write all modified files
-      edits.each do |edit|
-        path = File.join(base_dir, String.new(edit.path))
-        File.write(path, results[String.new(edit.path)])
-      end
-    end
-
-    # Build a C0DIFF document.
-    def self.build(& : DiffBuilder ->) : Bytes
-      builder = DiffBuilder.new
-      yield builder
-      builder.to_slice
-    end
-
-    private def self.count_occurrences(haystack : String, needle : String) : Int32
-      count = 0
-      pos = 0
-      while (idx = haystack.index(needle, pos))
-        count += 1
-        pos = idx + needle.size
-      end
-      count
-    end
-
-    # Parse a file edit starting at pos (after FS).
-    protected def self.parse_file_at(buf : Bytes, pos : Int32) : {FileEdit, Int32}
-      len = buf.size.to_i32
-      ptr = buf.to_unsafe
-
-      # Read file path
-      path_start = pos
-      while pos < len && ptr[pos] >= 0x20_u8
-        pos += 1
-      end
-      path = buf[path_start...pos]
-
-      # Read sections
-      sections = Array(Section).new
-
-      while pos < len
-        byte = ptr[pos]
-        break if byte == FS || byte == EOT
-
-        if byte == GS
-          pos += 1
-          units, pos = parse_section_at(buf, pos)
-          sections << Section.new(units)
-        else
-          pos += 1
-        end
-      end
-
-      {FileEdit.new(path, sections), pos}
-    end
-
-    # Parse a section's units starting at pos (after GS).
-    protected def self.parse_section_at(buf : Bytes, pos : Int32) : {Array(Unit), Int32}
-      units = Array(Unit).new
-      len = buf.size.to_i32
-      ptr = buf.to_unsafe
-      in_sub = false
-      data_start = pos
-
-      while pos < len
-        byte = ptr[pos]
-        break if byte == GS || byte == FS || byte == EOT
-
-        case byte
-        when US
-          # End current data span
-          if pos > data_start
-            span = collect_data(buf, data_start, pos)
-            if in_sub
-              # This is the "new" part — complete the Sub
-              old = units.pop.as(Bytes)
-              units << Sub.new(old, span)
-              in_sub = false
+        case b
+        when FS
+          name, pos = read_name(buf, pos + 1, len)
+          unless dead
+            flush.call
+            raise Error.new("the same path twice: #{name}") if files.any? { |f| f.path == name }
+            path = name
+          end
+        when GS
+          raise Error.new("section before any file") unless path
+          units, pos = parse_pattern(buf, pos + 1, len)
+          sections << Section.new(units) unless dead
+        when RS
+          raise Error.new("replace-all before any file") unless path
+          old, pos = read_dvalue(buf, pos + 1, len)
+          raise Error.new("replace-all with an empty old part") if old.empty?
+          raise Error.new("replace-all without SUB") unless pos < len && ptr[pos] == SUB
+          new, pos = read_dvalue(buf, pos + 1, len)
+          unless dead
+            if sections.empty?
+              leading << {old, new}
             else
-              units << span
+              sections[-1].replaces << {old, new}
             end
           end
-          pos += 1
-          data_start = pos
-        when SUB
-          # End current data span (this is the "old" part)
-          if pos > data_start
-            span = collect_data(buf, data_start, pos)
-            units << span # temporarily store as old
-            in_sub = true
-          end
-          pos += 1
-          data_start = pos
-        when DLE
-          pos += 2 # skip DLE + escaped byte
+        when ETB
+          pos = Scan.plain(buf, Scan.layout(buf, pos + 1, len), len)
+        when EOT
+          pos = Scan.layout(buf, pos + 1, len)
+          raise SyntaxError.new("unexpected byte after EOT", pos) if pos < len && ptr[pos] != SYN && ptr[pos] != EM
+          break
         else
-          pos += 1
+          raise SyntaxError.new("unexpected byte in a diff body", pos)
         end
       end
-
-      # Handle trailing data
-      if pos > data_start
-        span = collect_data(buf, data_start, pos)
-        if in_sub
-          old = units.pop.as(Bytes)
-          units << Sub.new(old, span)
-        else
-          units << span
-        end
-      end
-
-      {units, pos}
+      flush.call
+      files
     end
 
-    # Collect data bytes from a span, handling DLE escapes.
-    private def self.collect_data(buf : Bytes, start : Int32, stop : Int32) : Bytes
-      ptr = buf.to_unsafe
-      # Fast path: no DLE in span
-      has_dle = false
-      pos = start
-      while pos < stop
-        if ptr[pos] == DLE
-          has_dle = true
-          break
-        end
-        pos += 1
+    # Apply a diff to in-memory files. Validates everything first; raises
+    # without touching the hash on any error. Returns the edited files.
+    def self.apply(diff_buf : Bytes, files : Hash(String, String)) : Hash(String, String)
+      edits = parse(diff_buf)
+      results = {} of String => Bytes
+      edits.each do |e|
+        content = files[e.path]? || raise Error.new("no such file: #{e.path}")
+        results[e.path] = apply_file(content.to_slice, e)
       end
+      out = files.dup
+      results.each { |k, v| out[k] = String.new(v) }
+      out
+    end
 
-      return buf[start...stop] unless has_dle
+    def self.apply(diff_buf : Bytes, files : Hash(String, Bytes)) : Hash(String, Bytes)
+      edits = parse(diff_buf)
+      results = {} of String => Bytes
+      edits.each do |e|
+        content = files[e.path]? || raise Error.new("no such file: #{e.path}")
+        results[e.path] = apply_file(content, e)
+      end
+      out = files.dup
+      results.each { |k, v| out[k] = v }
+      out
+    end
 
-      # Slow path: copy with DLE removal
-      io = IO::Memory.new(stop - start)
-      pos = start
-      while pos < stop
-        if ptr[pos] == DLE
-          pos += 1
-          io.write_byte(ptr[pos]) if pos < stop
-          pos += 1
-        else
-          io.write_byte(ptr[pos])
-          pos += 1
-        end
+    # Apply a diff to files on disk under base_dir, atomically: every file
+    # is validated before any is written, and each is written via a
+    # temporary file and rename.
+    def self.apply_files(diff_buf : Bytes, base_dir : String = ".") : Nil
+      edits = parse(diff_buf)
+      base = Path.new(base_dir).expand
+      planned = Array({Path, Bytes}).new
+      edits.each do |e|
+        target = (base / e.path).expand
+        raise Error.new("path escapes the target directory: #{e.path}") unless target.to_s.starts_with?(base.to_s)
+        raise Error.new("no such file: #{e.path}") unless File.exists?(target)
+        planned << {target, apply_file(File.read(target).to_slice, e)}
+      end
+      planned.each do |(target, bytes)|
+        tmp = target.to_s + ".c0diff.tmp"
+        File.write(tmp, bytes)
+        File.rename(tmp, target.to_s)
+      end
+    end
+
+    # Apply one file's edits (DIFF.md "Sections", "Replace-all").
+    def self.apply_file(data : Bytes, edit : FileEdit) : Bytes
+      cursor = 0
+      matches = Array({Int32, Int32, Bytes}).new
+      edit.sections.each do |sec|
+        search = sec.search
+        raise Error.new("empty search text in #{edit.path}") if search.empty?
+        first = find(data, search, cursor)
+        raise Error.new("pattern not found in #{edit.path}: #{String.new(search).inspect}") if first < 0
+        raise Error.new("pattern matched more than once in #{edit.path}: #{String.new(search).inspect}") if find(data, search, first + 1) >= 0
+        matches << {first, first + search.size, sec.replacement}
+        cursor = first + search.size
+      end
+      # scopes: before the first match, and after each match to the next
+      io = IO::Memory.new
+      first_start = matches.empty? ? data.size : matches[0][0]
+      io.write(replace_all(data[0...first_start], edit.leading_replaces, edit.path))
+      matches.each_with_index do |(s, e, repl), i|
+        io.write(repl)
+        nxt = i + 1 < matches.size ? matches[i + 1][0] : data.size
+        io.write(replace_all(data[e...nxt], edit.sections[i].replaces, edit.path))
       end
       io.to_slice
     end
 
+    private def self.replace_all(segment : Bytes, replaces : Array({Bytes, Bytes}), path : String) : Bytes
+      replaces.each do |(old, new)|
+        count = 0
+        io = IO::Memory.new
+        pos = 0
+        while (i = find(segment, old, pos)) >= 0
+          io.write(segment[pos...i])
+          io.write(new)
+          pos = i + old.size
+          count += 1
+        end
+        raise Error.new("replace-all found nothing in #{path}: #{String.new(old).inspect}") if count == 0
+        io.write(segment[pos...segment.size])
+        segment = io.to_slice
+      end
+      segment
+    end
+
+    private def self.find(hay : Bytes, needle : Bytes, from : Int32) : Int32
+      return -1 if needle.empty?
+      last = hay.size - needle.size
+      i = from
+      while i <= last
+        if hay[i] == needle[0] && hay[i, needle.size] == needle
+          return i
+        end
+        i += 1
+      end
+      -1
+    end
+
+    private def self.read_name(buf : Bytes, pos : Int32, len : Int32) : {String, Int32}
+      pos = Scan.layout(buf, pos, len)
+      raise SyntaxError.new("a path cannot be text", pos) if pos < len && buf[pos] == STX
+      stop = Scan.plain(buf, pos, len)
+      {String.new(C0.trim(buf[pos...stop])), stop}
+    end
+
+    private def self.read_dvalue(buf : Bytes, pos : Int32, len : Int32) : {Bytes, Int32}
+      ptr = buf.to_unsafe
+      pos = Scan.layout(buf, pos, len)
+      return {Bytes.empty, pos} if pos >= len
+      if ptr[pos] == STX
+        stop = Scan.text(buf, pos, len)
+        val = C0.decode_text(buf[(pos + 1)...(stop - 1)])
+        {val, Scan.layout(buf, stop, len)}
+      elsif ptr[pos] >= 0x20_u8
+        stop = Scan.plain(buf, pos, len)
+        {C0.trim(buf[pos...stop]), stop}
+      else
+        {Bytes.empty, pos}
+      end
+    end
+
+    private def self.parse_pattern(buf : Bytes, pos : Int32, len : Int32) : {Array(Unit), Int32}
+      ptr = buf.to_unsafe
+      units = Array(Unit).new
+      loop do
+        old, pos = read_dvalue(buf, pos, len)
+        if pos < len && ptr[pos] == SUB
+          new, pos = read_dvalue(buf, pos + 1, len)
+          units << Unit.new(old, new)
+        else
+          units << Unit.new(old, nil)
+        end
+        # notes after a unit
+        while pos < len && ptr[pos] == BEL
+          p2 = Scan.layout(buf, pos + 1, len)
+          break unless p2 < len && (ptr[p2] >= 0x20_u8 || ptr[p2] == STX)
+          pos = Scan.layout(buf, Scan.comment(buf, pos, len), len)
+        end
+        break unless pos < len && ptr[pos] == US
+        pos += 1
+      end
+      {units, pos}
+    end
+
+    def self.build(& : DiffBuilder ->) : Bytes
+      b = DiffBuilder.new
+      yield b
+      b.to_slice
+    end
   end
 
-  # Builder for C0DIFF documents.
   class DiffBuilder
     @io : IO::Memory
 
-    def initialize
+    def initialize(heading : Bool = true)
       @io = IO::Memory.new
+      if heading
+        @io.write_byte(SYN)
+        @io.write_byte(SOH)
+        @io.write("shape".to_slice)
+        @io.write_byte(US)
+        @io.write("diff".to_slice)
+      end
     end
 
-    # Add a file edit.
     def file(path : String, & : ->) : Nil
       @io.write_byte(FS)
-      @io << path
+      C0.write_name(@io, path.to_slice)
       yield
     end
 
-    # Add a section (pattern) within the current file.
     def section(& : SectionBuilder ->) : Nil
       @io.write_byte(GS)
-      sb = SectionBuilder.new(@io)
-      yield sb
+      yield SectionBuilder.new(@io)
     end
 
-    # Convenience: add a simple find/replace section.
+    # anchor, old → new, anchor in one call.
     def replace(context_before : String, old_text : String, new_text : String, context_after : String = "") : Nil
-      @io.write_byte(GS)
-      write_escaped(context_before) unless context_before.empty?
-      @io.write_byte(US) unless context_before.empty?
-      write_escaped(old_text)
-      @io.write_byte(SUB)
-      write_escaped(new_text)
-      unless context_after.empty?
-        @io.write_byte(US)
-        write_escaped(context_after)
+      section do |s|
+        s.anchor(context_before) unless context_before.empty?
+        s.sub(old_text, new_text)
+        s.anchor(context_after) unless context_after.empty?
       end
+    end
+
+    # RS old SUB new: every occurrence within the current section's scope.
+    def replace_all(old_text : String, new_text : String) : Nil
+      raise Diff::Error.new("replace-all needs a non-empty old part") if old_text.empty?
+      @io.write_byte(RS)
+      C0.write_value(@io, old_text)
+      @io.write_byte(SUB)
+      C0.write_value(@io, new_text)
+    end
+
+    def note(text : String) : Nil
+      @io.write_byte(BEL)
+      C0.write_value(@io, text)
+    end
+
+    def eot : Nil
+      @io.write_byte(EOT)
     end
 
     def to_slice : Bytes
       @io.to_slice
     end
-
-    private def write_escaped(str : String) : Nil
-      str.each_byte do |byte|
-        @io.write_byte(DLE) if byte < 0x20_u8
-        @io.write_byte(byte)
-      end
-    end
   end
 
-  # Builder for individual diff sections.
   class SectionBuilder
+    @first : Bool
+
     def initialize(@io : IO::Memory)
       @first = true
     end
 
-    # Add literal anchor text.
     def anchor(text : String) : Nil
-      @io.write_byte(US) unless @first
-      write_escaped(text)
-      @first = false
+      sep
+      C0.write_value(@io, text)
     end
 
-    # Add a substitution (old → new).
     def sub(old_text : String, new_text : String) : Nil
-      @io.write_byte(US) unless @first
-      write_escaped(old_text)
+      sep
+      C0.write_value(@io, old_text)
       @io.write_byte(SUB)
-      write_escaped(new_text)
-      @first = false
+      C0.write_value(@io, new_text)
     end
 
-    private def write_escaped(str : String) : Nil
-      str.each_byte do |byte|
-        @io.write_byte(DLE) if byte < 0x20_u8
-        @io.write_byte(byte)
-      end
+    private def sep : Nil
+      @io.write_byte(US) unless @first
+      @first = false
     end
   end
 end

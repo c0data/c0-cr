@@ -327,8 +327,15 @@ module C0
 
     # Whether the record is keyed (its first unit is an SOH).
     def keyed? : Bool
+      ptr = @buf.to_unsafe
       p = Scan.layout(@buf, @start, @end)
-      p < @end && @buf[p] == SOH
+      while p < @end && ptr[p] == BEL
+        p2 = Scan.layout(@buf, p + 1, @end)
+        return true if p2 < @end && ptr[p2] == SOH
+        break if p2 < @end && ptr[p2] < 0x20_u8 && ptr[p2] != STX && ptr[p2] != DLE
+        p = Scan.layout(@buf, Scan.comment(@buf, p, @end), @end)
+      end
+      p < @end && ptr[p] == SOH
     end
 
     # ---- positional -----------------------------------------------------

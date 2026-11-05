@@ -202,7 +202,7 @@ module C0
       ptr = buf.to_unsafe
       pos += 1 # BEL
       pos = layout(buf, pos, stop)
-      return pos if pos >= stop
+      raise UnexpectedEndError.new("BEL at end of input", pos) if pos >= stop
       byte = ptr[pos]
       if byte >= 0x20_u8
         pos = plain(buf, pos, stop)
@@ -229,6 +229,8 @@ module C0
         plain(buf, p2, stop)
       elsif byte == FS
         plain(buf, pos + 1, stop)
+      elsif byte == RS
+        record_end(buf, pos + 1, stop)
       else
         raise SyntaxError.new("BEL before a code that is not an element", pos)
       end
@@ -245,6 +247,9 @@ module C0
         elsif byte == US
           pos += 1
         elsif byte == SOH
+          # a header row (SOH RS) ends the record; a keyed unit is inside it
+          p2 = layout(buf, pos + 1, stop)
+          return pos if p2 < stop && ptr[p2] == RS
           pos += 1
         elsif byte == STX
           pos = text(buf, pos, stop)
@@ -448,7 +453,7 @@ require "./c0/document"
 require "./c0/builder"
 # require "./c0/pretty"
 require "./c0/stream"
-# require "./c0/diff"
+require "./c0/diff"
 # require "./c0/csv"
 # require "./c0/json"
 # require "./c0/serializable"

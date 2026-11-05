@@ -367,6 +367,24 @@ describe "conformance" do
     end
   end
 
+  describe "diff.json" do
+    conformance_cases("diff.json").each do |c|
+      it c["name"].as_s do
+        diff = c["diff"].as_s.hexbytes
+        files = {} of String => String
+        c["files"].as_h.each { |k, v| files[k] = v.as_s }
+        if c["error"]?
+          expect_raises(C0::Error) { C0::Diff.apply(diff, files) }
+        else
+          got = C0::Diff.apply(diff, files)
+          expected = {} of String => String
+          c["result"].as_h.each { |k, v| expected[k] = v.as_s }
+          got.should eq(expected)
+        end
+      end
+    end
+  end
+
   describe "stream.json" do
     conformance_cases("stream.json").each do |c|
       it c["name"].as_s do
