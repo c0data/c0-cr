@@ -321,6 +321,7 @@ describe "conformance" do
             end
           elsif lvl = f["level"]?
             check_body(rec.level(i), lvl)
+            expect_raises(C0::Error) { rec.list(i) }
           end
         end
         if c["canonical"].as_bool

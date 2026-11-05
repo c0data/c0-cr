@@ -380,6 +380,7 @@ module C0
       recs = body.records
       return Array(Bytes).new if recs.empty? && body.bare?
       raise Error.new("level is not a list (#{recs.size} records)") unless recs.size == 1 && body.bare?
+      raise Error.new("level is not a list (header row)") if body.groups[0]?.try(&.has_header?)
       raise Error.new("level is not a list (keyed record)") if recs[0].keyed?
       recs[0].values
     end

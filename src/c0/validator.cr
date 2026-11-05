@@ -118,9 +118,9 @@ module C0
     end
 
     private def check_keys(keys : Array(Bytes)) : Nil
-      (1...keys.size).each do |i|
-        c = keys[i - 1] <=> keys[i]
-        not_canonical("duplicate key") if c == 0
+      seen = Set(Bytes).new
+      keys.each do |k|
+        not_canonical("duplicate key") unless seen.add?(k)
       end
     end
 

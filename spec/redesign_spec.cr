@@ -95,6 +95,13 @@ describe "JSON" do
   end
 end
 
+describe "Validator" do
+  it "finds a non-adjacent duplicate key" do
+    C0.canonical?(C0::Pretty.parse("␞␁a␟1␁b␟2␁a␟3")).should be_false
+    C0.canonical?(C0::Pretty.parse("␞␁a␟1␁b␟2␁c␟3")).should be_true
+  end
+end
+
 describe "CSV" do
   it "writes a reference as its path and picks a named group" do
     buf = C0::Pretty.parse("␝a␞1␝links␁␞user␟tag␞␅␂users␟1␃␟␅tags")
