@@ -11,7 +11,7 @@ module C0
   #   end
   #
   # Values are written in their one spelling: plain when they can be, text
-  # otherwise. Keyed records (`map`) are sorted. Nested levels (`level`,
+  # otherwise. Keyed records (`map`) keep the order given. Nested levels (`level`,
   # `list`, `map` as a unit) open with DLE and close with CAN.
   class Builder
     @io : IO::Memory
@@ -42,12 +42,12 @@ module C0
 
     # ---- documents -------------------------------------------------------
 
-    # SYN and a heading. Keys are sorted; values written as values; a
+    # SYN and a heading. Keys in the order given; values written as values; a
     # Builder block value is written as a nested level.
     def syn(pairs : Hash(String, String) = {} of String => String) : Nil
       end_record
       @io.write_byte(SYN)
-      pairs.keys.sort!.each do |k|
+      pairs.each_key do |k|
         @io.write_byte(SOH)
         C0.write_name(@io, k.to_slice)
         @io.write_byte(US)
@@ -173,11 +173,11 @@ module C0
       C0.write_value(@io, value.is_a?(String) ? value.to_slice : value)
     end
 
-    # A keyed record: a map, keys sorted. Values may be strings or, for a
+    # A keyed record: a map, entries in the order given. Values may be strings or, for a
     # nested level, a Proc taking no arguments that writes it.
     def map(pairs : Hash(String, String)) : Nil
       start_record
-      pairs.keys.sort!.each do |k|
+      pairs.each_key do |k|
         @io.write_byte(SOH)
         C0.write_name(@io, k.to_slice)
         @io.write_byte(US)
@@ -186,7 +186,7 @@ module C0
       @units += pairs.size
     end
 
-    # One keyed unit on the open record (caller keeps keys sorted).
+    # One keyed unit on the open record (order is the caller's).
     def key(name : String, value : String | Bytes) : Nil
       start_record unless @in_record
       @io.write_byte(SOH)

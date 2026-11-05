@@ -175,15 +175,14 @@ module C0
       io.write_byte(C0::CAN)
     end
 
-    # A hash is a map: a level holding one keyed record, keys sorted.
+    # A hash is a map: a level holding one keyed record, entries in hash order.
     def self._serialize_field(value : Hash, io : IO) : Nil
       io.write_byte(C0::DLE)
       io.write_byte(C0::RS)
-      value.keys.map(&.to_s).sort!.each do |k|
+      value.each do |k, v|
         io.write_byte(C0::SOH)
-        C0.write_name(io, k.to_slice)
+        C0.write_name(io, k.to_s.to_slice)
         io.write_byte(C0::US)
-        v = value[value.keys.find! { |kk| kk.to_s == k }]
         _serialize_field(v, io)
       end
       io.write_byte(C0::CAN)

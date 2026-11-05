@@ -23,7 +23,7 @@ struct NamedTuple
     io.write_byte(C0::GS)
     C0.write_name(io, group_name.to_slice)
     io.write_byte(C0::RS)
-    {% for key in T.keys.sort %}
+    {% for key in T.keys %}
       io.write_byte(C0::SOH)
       C0.write_name(io, {{ key.stringify }}.to_slice)
       io.write_byte(C0::US)
@@ -38,17 +38,16 @@ struct NamedTuple
 end
 
 class Hash(K, V)
-  # One group holding one keyed record, keys sorted.
+  # One group holding one keyed record, entries in hash order.
   def to_c0(group_name : String = "data") : Bytes
     io = IO::Memory.new
     io.write_byte(C0::GS)
     C0.write_name(io, group_name.to_slice)
     io.write_byte(C0::RS)
-    keys.map(&.to_s).sort!.each do |k|
+    each do |k, v|
       io.write_byte(C0::SOH)
-      C0.write_name(io, k.to_slice)
+      C0.write_name(io, k.to_s.to_slice)
       io.write_byte(C0::US)
-      v = self[keys.find! { |kk| kk.to_s == k }]
       C0::Serializable._serialize_field(v, io)
     end
     io.to_slice.dup

@@ -162,7 +162,7 @@ buf = C0::Builder.build do |b|
     b.list(["Admin", "Editor"])          # ␐␞Admin␟Editor␘
   end
   b.group("config")
-  b.map({"port" => "5432", "host" => "localhost"})   # keys sorted
+  b.map({"port" => "5432", "host" => "localhost"})   # order kept
   b.eot
 end
 ```

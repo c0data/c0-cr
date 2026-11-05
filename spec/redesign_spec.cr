@@ -89,9 +89,9 @@ describe "JSON" do
     C0.canonical?(back).should be_true
   end
 
-  it "imports a top-level object of scalars as a map" do
+  it "imports a top-level object of scalars as a map, order kept" do
     buf = C0::JSON.from_json(%({"b": "2", "a": "1"}), "cfg")
-    buf.should eq(C0::Pretty.parse("␝cfg␞␁a␟1␁b␟2"))
+    buf.should eq(C0::Pretty.parse("␝cfg␞␁b␟2␁a␟1"))
   end
 end
 
@@ -119,8 +119,8 @@ describe "Serializable" do
     User.array_from_c0(arr)[1].roles.should eq([] of String)
   end
 
-  it "maps a Hash to one keyed record" do
-    {"b" => "2", "a" => "1"}.to_c0("cfg").should eq(C0::Pretty.parse("␝cfg␞␁a␟1␁b␟2"))
+  it "maps a Hash to one keyed record, order kept" do
+    {"b" => "2", "a" => "1"}.to_c0("cfg").should eq(C0::Pretty.parse("␝cfg␞␁b␟2␁a␟1"))
   end
 end
 

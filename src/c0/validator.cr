@@ -24,8 +24,8 @@ module C0
       Validator.new(buf).run
     end
 
-    # Well-formed and canonical: no layout, one spelling per value, keyed
-    # records sorted and unique, no framing, no comments.
+    # Well-formed and canonical: no layout, one spelling per value, keys
+    # unique within a keyed record, no framing, no comments.
     def self.canonical?(buf : Bytes) : Bool
       v = Validator.new(buf, canonical: true)
       begin
@@ -121,7 +121,6 @@ module C0
       (1...keys.size).each do |i|
         c = keys[i - 1] <=> keys[i]
         not_canonical("duplicate key") if c == 0
-        not_canonical("keys out of order") if c > 0
       end
     end
 

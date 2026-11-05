@@ -195,11 +195,10 @@ module C0
       end
     end
 
-    # An object → one keyed record, keys sorted.
+    # An object → one keyed record, entries in object order.
     private def self.emit_map(b : Builder, hash : Hash(String, Value)) : Nil
       b.record
-      hash.keys.sort!.each do |k|
-        v = hash[k]
+      hash.each do |k, v|
         case v
         when String then b.key(k, v)
         else             b.key(k) { emit_level_body(b, v) }
