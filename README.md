@@ -1,147 +1,141 @@
 # C0DATA
 
 A data system built on ASCII C0 control codes. One vocabulary, multiple shapes
--- tabular data, hierarchical documents, key-value config, diffs, and more.
+-- tabular data, hierarchical documents, key-value config, diffs, logs, and
+more.
 
 C0DATA sits between human-readable text formats (JSON, YAML, TOML) and opaque
 binary formats (protobuf, msgpack). Values are plain UTF-8 text. Structure is
 expressed through single-byte control codes -- compact, zero-copy friendly,
 and inspectable with minimal tooling.
 
+This is the Crystal reference implementation of the 2026-10 (pre-1.0)
+redesign, specified in [c0-spec](https://github.com/c0data/c0-spec).
+
 ## The Idea
 
 ASCII has 32 control codes (0x00-0x1F) that were designed in the 1960s for
 structuring data transmissions. Four of them -- FS, GS, RS, US -- are literal
-**data separators** at four hierarchical levels. C0DATA modernizes these codes
-as a universal grammar for structured data.
+**data separators** at four hierarchical levels. C0DATA takes them, and a
+dozen of their neighbours, at their word.
 
 ```
-␜mydb
+␖␜mydb
   ␝users
-    ␁name␟amount␟type
+    ␁␞name␟amount␟type
     ␞Alice␟1502.30␟DEPOSIT
     ␞Bob␟340.00␟WITHDRAWAL
   ␝products
-    ␁id␟product␟qty
+    ␁␞id␟product␟qty
     ␞01␟Widget␟100
     ␞02␟Gadget␟250
 ␄
 ```
 
-That's a complete database with two tables, headers, and typed rows. Each
-glyph (␜ ␝ ␞ ␟ ␁ ␄) is a single-byte control code. No braces, no quotes,
-no escaping. Whitespace around control codes is trimmed -- the indentation
-is just for readability.
+That's a complete document with two tables, header rows, and typed rows.
+Each glyph (␖ ␜ ␝ ␁ ␞ ␟ ␄) is a single-byte control code. No braces, no
+commas; quoting only where a value holds whitespace or a control code.
+Whitespace touching a control code is layout -- the indentation is just for
+readability.
 
 ## Control Codes
 
-| Byte | Abbr | Role |
-|------|------|------|
-| 0x01 | SOH | Header (declares field names) |
-| 0x02 | STX | Open nested sub-structure |
-| 0x03 | ETX | Close nested sub-structure |
-| 0x04 | EOT | End of document |
-| 0x05 | ENQ | Reference (look up named data) |
-| 0x10 | DLE | Escape (next byte is literal) |
-| 0x17 | ETB | Commit marker (stream mode) |
-| 0x1A | SUB | Substitution (C0DIFF) |
-| 0x1C | FS  | File / Database separator |
-| 0x1D | GS  | Group / Table / Section separator |
-| 0x1E | RS  | Record / Row separator |
-| 0x1F | US  | Unit / Field separator |
+| Byte | Abbr | Glyph | Role |
+|------|------|-------|------|
+| 0x01 | SOH | ␁ | A key for the value after it; `␁␞` a header row |
+| 0x02 | STX | ␂ | Start of text (a literal value) |
+| 0x03 | ETX | ␃ | End of text |
+| 0x04 | EOT | ␄ | End of document |
+| 0x05 | ENQ | ␅ | Reference |
+| 0x07 | BEL | ␇ | Comment: a note, or marks the next element dead |
+| 0x10 | DLE | ␐ | Recurse: open a nested level (escape inside text) |
+| 0x16 | SYN | ␖ | Start of document, then the heading |
+| 0x17 | ETB | ␗ | Commit marker (stream mode) |
+| 0x18 | CAN | ␘ | Close a nested level |
+| 0x19 | EM  | ␙ | End of medium: a raw blob follows |
+| 0x1A | SUB | ␚ | Substitution (C0-DIFF) |
+| 0x1C | FS  | ␜ | File separator |
+| 0x1D | GS  | ␝ | Group / table / section separator |
+| 0x1E | RS  | ␞ | Record / row separator |
+| 0x1F | US  | ␟ | Unit / field separator |
 
 ## Data Shapes
 
-The same codes express multiple common data shapes:
-
-### Tabular (CSV, SQL)
+### Tabular
 
 ```
 ␝users
-  ␁name␟amount␟type
+  ␁␞name␟amount␟type
   ␞Alice␟1502.30␟DEPOSIT
-  ␞Bob␟340.00␟WITHDRAWAL
 ```
 
-### Key-Value (TOML, INI)
+### Key-value (a keyed record is a map)
 
 ```
 ␝database
-  ␞host␟localhost
-  ␞port␟5432
-␝server
-  ␞host␟0.0.0.0
-  ␞port␟8080
+  ␞␁host␟localhost␁port␟5432
 ```
 
-### Document (Markdown)
+### Nested values
 
-GS repeated indicates depth level (like # in Markdown):
-
-```
-␜My Document
-  ␝Chapter 1
-    ␞First paragraph.
-    ␞A list:
-      ␟Item one
-      ␟Item two
-    ␝␝Section 1.1
-      ␞Nested content.
-  ␝Chapter 2
-    ␞And so on.
-```
-
-### Diff (Atomic Multi-File Edits)
-
-C0DIFF uses anchored patterns for safe search-and-replace:
+A field can hold a whole level: a list, a table, a map, even a document.
 
 ```
-␜foo.txt
-  ␝Hello ␟world␚universe␟!
+␞Alice␟␐␞Admin␟Editor␘␟␐␞␁city␟Springfield␁street␟1 Main␘
 ```
 
-Means: in `foo.txt`, find `Hello world!`, replace `world` with `universe`.
+### Text
 
-### Stream (Append-Only Logs)
-
-For event logs and write-ahead logs, ETB (␗) commits each appended block.
-A crashed append never writes its commit marker, so replay skips the torn
-tail instead of folding corrupt state:
+A value with edge whitespace, a line break, a tab or any control code is
+written as text; inside, only seven codes need a `␐` escape.
 
 ```
+␞note␟␂line one
+line two␃
+```
+
+### Document
+
+```
+␖␜My Document
+␝Chapter 1
+␞First paragraph.
+␝␝Section 1.1
+␞Nested content.
+␄
+```
+
+### Stream (append-only logs)
+
+ETB commits each appended block; a crashed append never writes its
+commit, so replay skips the torn tail.
+
+```
+␖␁shape␟stream␁␞op␟id␗
 ␞create␟a1b2␗
 ␞name␟draft-2␗
 ```
 
-A block may hold several records under one commit — an atomic batch.
+### Diff
 
-### Whitespace and Quoting
-
-In pretty form, whitespace around control codes is trimmed. To preserve
-significant whitespace, use STX/ETX as quotes:
+Anchored patterns, with `␞old␚new` for replace-all within a section's
+scope. See `DIFF.md` in the spec.
 
 ```
-␞␂  leading spaces  ␃␟normal value
+␖␁shape␟diff
+␜tally.rb
+␝def tally(items)
+␞count␚total
+␝end
+␄
 ```
 
 ## Performance
 
-The scanner's hot loop is a single comparison: `byte < 0x20`. This makes
-C0DATA inherently fast to parse -- single-byte delimiters, zero-copy
-friendly, and SIMD-acceleratable.
-
-Benchmark on 10 MB document (Crystal, --release):
-
-```
-  avg         4.88 ms       2048.0 MB/s
-  best        4.09 ms       2447.7 MB/s
-```
-
-For comparison, a fast YAML scanner in C achieves ~420 MB/s on equivalent data.
+The scanner's hot loop is a single comparison: `byte < 0x20`. Single-byte
+delimiters, zero-copy reads, SIMD-friendly.
 
 ## Installation
-
-Add the dependency to your `shard.yml`:
 
 ```yaml
 dependencies:
@@ -149,227 +143,132 @@ dependencies:
     github: c0data/c0-cr
 ```
 
-Then run `shards install`.
-
 ## Usage
 
 ```crystal
 require "c0"
 ```
 
-### Serializable
-
-Like `JSON::Serializable`, include `C0::Serializable` in a class to get
-`to_c0` and `from_c0` methods:
-
-```crystal
-class User
-  include C0::Serializable
-
-  property name : String
-  property amount : String
-
-  def initialize(@name = "", @amount = "")
-  end
-end
-
-# Serialize
-user = User.new("Alice", "1502.30")
-buf = user.to_c0               # => Bytes (compact form)
-str = user.to_c0_pretty        # => String (pretty form)
-
-# Deserialize
-user = User.from_c0(buf)
-user = User.from_c0(pretty_string)
-
-# Collections
-users = [User.new("Alice", "100"), User.new("Bob", "200")]
-buf = users.to_c0              # multi-record group
-restored = User.array_from_c0(buf)
-```
-
-Field annotations:
-
-```crystal
-class Product
-  include C0::Serializable
-
-  @[C0::Field(key: "product_id")]
-  property id : Int32 = 0
-
-  @[C0::Field(ignore: true)]
-  property internal : String = ""
-
-  property name : String = ""
-
-  def initialize(@id = 0, @name = "", @internal = "")
-  end
-end
-```
-
-Hashes and named tuples serialize as key-value groups:
-
-```crystal
-{"host" => "localhost", "port" => "5432"}.to_c0("database")
-{host: "localhost", port: "5432"}.to_c0("config")
-```
-
 ### Building
 
 ```crystal
 buf = C0::Builder.build do |b|
-  b.file("mydb") do
-    b.group("users", headers: ["name", "amount", "type"]) do
-      b.record("Alice", "1502.30", "DEPOSIT")
-      b.record("Bob", "340.00", "WITHDRAWAL")
-    end
+  b.syn(shape: "tabular")
+  b.file("mydb")
+  b.group("users", ["name", "amount", "roles"]) do
+    b.record
+    b.field("Alice")
+    b.field("1502.30")
+    b.list(["Admin", "Editor"])          # ␐␞Admin␟Editor␘
   end
+  b.group("config")
+  b.map({"port" => "5432", "host" => "localhost"})   # keys sorted
   b.eot
 end
 ```
+
+Values are written in their one canonical spelling: plain when they can
+be, text otherwise. `b.level { ... }` opens a nested level as the next
+unit; `b.key(name, value)` adds a keyed unit; `b.note(text)` a comment.
 
 ### Reading
 
 ```crystal
 doc = C0::Document.new(buf)
-doc.name                                # => "mydb"
-doc["users"].table.record(0).field(0)   # => "Alice" (zero-copy slice)
-doc["users"].table.record(0).field(1)   # => "1502.30"
+doc.heading.shape                 # => "tabular"
+doc.name                          # => "mydb"
+users = doc["users"]
+users.headers                     # => ["name", "amount", "roles"]
+rec = users.record(0)
+rec.value(0)                      # => "Alice" (zero-copy slice)
+rec.list(2)                       # => ["Admin", "Editor"]
+rec.level(2).records              # the same level, as a body
+doc["config"].record(0)["host"]   # => "localhost"
+doc.warnings                      # missing SYN/EOT, unknown heading keys
 ```
 
-A field whose value is a flat list (US-separated items inside STX/ETX) is
-written with `list_field` and read back with `Record#list`:
+`C0::Container.new(buf)` reads a file holding several documents and an EM
+blob tail (`container.blob("name")`). `C0.validate(bytes)` checks
+well-formedness against the grammar; `C0.canonical?(bytes)` checks the
+canonical constraints.
+
+### Pretty form
 
 ```crystal
-buf = C0::Builder.build do |b|
-  b.group("users") do
-    b.record("Alice")
-    b.list_field(["Admin", "Editor"])   # one field: ␂Admin␟Editor␃
-  end
-end
-C0::Table.new(buf).record(0).list(1)  # => ["Admin", "Editor"] (unescaped slices)
+puts C0::Pretty.format(buf)                       # one element per line
+puts C0::Pretty.format(buf, mode: C0::Pretty::FormatMode::Spaced)
+C0::Pretty.parse(pretty) == buf                  # round trip
 ```
 
-### Pretty-Printing
+### Serializable
 
 ```crystal
-puts C0::Pretty.format(buf)
-# ␜mydb
-#   ␝users
-#     ␁name␟amount␟type
-#     ␞Alice␟1502.30␟DEPOSIT
-#     ␞Bob␟340.00␟WITHDRAWAL
-#   ␄
-```
-
-### Round-Trip
-
-```crystal
-pretty = C0::Pretty.format(buf)
-compact = C0::Pretty.parse(pretty)
-# compact is identical to the original buf
-```
-
-### CSV Conversion
-
-```crystal
-# CSV → C0DATA
-buf = C0::CSV.from_csv(csv_string, group_name: "users")
-
-# C0DATA → CSV
-csv = C0::CSV.to_csv(buf)
-```
-
-### JSON/YAML Conversion
-
-```crystal
-# JSON → C0DATA
-buf = C0::JSON.from_json(json_string)
-
-# YAML → C0DATA
-buf = C0::JSON.from_yaml(yaml_string, group_name: "config")
-
-# C0DATA → JSON
-json = C0::JSON.to_json(buf)
-
-# C0DATA → YAML
-yaml = C0::JSON.to_yaml(buf)
-```
-
-Tables become arrays of objects, key-value groups become flat objects.
-Nested JSON/YAML structures are preserved using STX/ETX scoping.
-
-### C0DIFF
-
-```crystal
-diff = C0::Diff.build do |b|
-  b.file("src/app.cr") do
-    b.section do |s|
-      s.anchor("class App\n  def ")
-      s.sub("run", "start")
-    end
-  end
+class User
+  include C0::Serializable
+  property name : String
+  property roles : Array(String)        # a list level
+  @[C0::Field(key: "amt")]
+  property amount : Float64
+  def initialize(@name, @roles, @amount); end
 end
 
-files = {"src/app.cr" => source_code}
-result = C0::Diff.apply(diff, files)
+User.new("Alice", ["admin"], 1.5).to_c0   # ␝user␁␞name␟roles␟amt␞Alice␟␐␞admin␘␟1.5
+User.from_c0(bytes)
+[u1, u2].to_c0
+{"b" => "2", "a" => "1"}.to_c0("cfg")      # ␝cfg␞␁a␟1␁b␟2
 ```
 
-### Stream Logs
+### JSON / YAML / CSV
 
 ```crystal
-C0::Stream::Writer.open("claims.c0") do |log|
-  log.record("create", nonce, ts)
-  log.batch do |b|              # atomic multi-record commit
-    b.record("name", label, ts)
-    b.record("tag", tag, ts)
-  end
-end
-
-reader = C0::Stream::Reader.read("claims.c0")
-reader.torn?                          # uncommitted tail present?
-reader.each_record { |rec| ... }      # committed records only
+C0::JSON.to_json(buf)        # positional record → array, keyed → object,
+C0::JSON.from_json(json)     # header row → array of objects; nothing guessed
+C0::JSON.to_yaml(buf) / C0::JSON.from_yaml(yaml)
+C0::CSV.from_csv(csv, "users") / C0::CSV.to_csv(buf)
 ```
 
-`Writer.open` repairs a torn tail before appending. `c0fmt validate -s`
-checks a log from the command line.
+### C0-DIFF
 
-## Two Forms
+```crystal
+diff = C0::Diff.build do |d|
+  d.file("tally.rb") do
+    d.section { |s| s.anchor("def tally(items)") }
+    d.replace_all("count", "total")
+    d.section { |s| s.anchor("end") }
+  end
+end
+C0::Diff.apply(diff, {"tally.rb" => source})   # validates everything first
+C0::Diff.apply_files(diff, "src")
+```
 
-C0DATA has two representations:
+### Stream logs
 
-- **Compact** -- canonical wire/storage format. Every byte is literal.
-  No whitespace is ignored.
-- **Pretty** -- human-readable. Uses Unicode Control Pictures (U+2400 block)
-  for visible glyphs. Newlines and indentation are ignored by the parser.
+```crystal
+C0::Stream::Writer.open("events.c0") do |w|
+  w.start                              # SYN heading, committed
+  w.header("op", "id")
+  w.record("create", "a1")
+  w.batch { |b| b.record("a", "1"); b.record("b", "2") }   # one commit
+end
 
-Compact form is canonical in the strong sense: the same logical value
-encodes to exactly one byte sequence, so compact bytes can be hashed for
-content addressing (see the spec's "Canonical Form"). `C0.canonical?(buf)`
-checks a buffer; the shared conformance vectors live in the
-[c0-spec](https://github.com/c0data/c0-spec) submodule at `c0-spec/` (run
-`git submodule update --init` after cloning).
+r = C0::Stream::Reader.read("events.c0")
+r.torn?            # uncommitted tail?
+r.damaged          # blocks cut by a commit inside open text or a level
+r.each_record { |rec| ... }
+```
 
-The `c0fmt` command-line tool converts between them and more.
+`Writer.open` repairs a torn tail before appending.
+
+## Conformance
+
+The shared vectors live in the [c0-spec](https://github.com/c0data/c0-spec)
+submodule at `c0-spec/` (`git submodule update --init` after cloning);
+`crystal spec` runs them along with the unit specs.
 
 ## c0fmt
 
-The `c0fmt` command-line tool (import/export CSV, JSON, YAML; pretty and
-compact forms; validation) lives in its own repository:
-https://github.com/c0data/c0-fmt. It is built on this library.
-
-## Design
-
-See the [specification](https://github.com/c0data/c0-spec/blob/main/DESIGN.md) (in the c0-spec submodule) for the full definition, including open
-questions and future directions.
-
-## Development
-
-```
-crystal spec        # run tests
-crystal build bench/bench_tokenizer.cr -o bench/bench_tokenizer --release
-./bench/bench_tokenizer 10   # benchmark with 10 MB document
-```
+The command-line tool lives in its own repository:
+https://github.com/c0data/c0-fmt.
 
 ## License
 
