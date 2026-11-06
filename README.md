@@ -171,6 +171,22 @@ Values are written in their one canonical spelling: plain when they can
 be, text otherwise. `b.level { ... }` opens a nested level as the next
 unit; `b.key(name, value)` adds a keyed unit; `b.note(text)` a comment.
 
+Underneath, the builder has one method per code: `fs`, `gs`, `rs`, `us`,
+`soh`, `dle`, `can`, `bel`, `enq`, `syn`, `eot`, `etb`, `em`. Each writes
+its code and, when given, what follows it, so a chain reads like the
+bytes, and anything the grammar allows can be written:
+
+```crystal
+b.rs("Alice").us("1502.30")                               # ␞Alice␟1502.30
+b.rs.soh("host").us("localhost").soh("port").us("5432")   # ␞␁host␟localhost␁port␟5432
+b.gs("users").soh.rs("name").us("amount")                 # header row
+b.bel.gs("old")                                           # a dead group
+```
+
+The composed methods above are built on these and cannot write ill-formed
+output; with the primitives, well-formedness is yours. The two layers
+share state and mix freely.
+
 ### Reading
 
 ```crystal

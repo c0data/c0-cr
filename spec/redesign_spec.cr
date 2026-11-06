@@ -140,6 +140,51 @@ end
 describe "Builder" do
   it "refuses an empty note" do
     expect_raises(ArgumentError) { C0::Builder.build { |b| b.record("a"); b.note("") } }
+    expect_raises(ArgumentError) { C0::Builder.build { |b| b.record("a"); b.bel("") } }
+  end
+
+  it "spells primitives as the bytes read" do
+    g = ->(buf : Bytes) { buf }
+    g.call(C0::Builder.build { |b| b.fs("inv").gs("users").soh.rs("name").us("amount") }).should eq C0::Pretty.parse("␜inv␝users␁␞name␟amount")
+    g.call(C0::Builder.build { |b| b.rs("Alice").us("1502.30") }).should eq C0::Pretty.parse("␞Alice␟1502.30")
+    g.call(C0::Builder.build { |b| b.rs.soh("host").us("localhost").soh("port").us("5432") }).should eq C0::Pretty.parse("␞␁host␟localhost␁port␟5432")
+    g.call(C0::Builder.build { |b| b.rs("cfg").us.dle.rs.soh("b").us("2").can }).should eq C0::Pretty.parse("␞cfg␟␐␞␁b␟2␘")
+    g.call(C0::Builder.build { |b| b.bel("checked").rs("x") }).should eq C0::Pretty.parse("␇checked␞x")
+    g.call(C0::Builder.build { |b| b.bel.gs("old").rs("1").gs("new").rs("2") }).should eq C0::Pretty.parse("␇␝old␞1␝new␞2")
+    g.call(C0::Builder.build { |b| b.gs.gs("sub").rs.enq("users").us.enq("users", "1") }).should eq C0::Pretty.parse("␝␝sub␞␅users␟␅␂users␟1␃")
+    g.call(C0::Builder.build { |b| b.syn.soh("version").us("1").rs("a").eot }).should eq C0::Pretty.parse("␖␁version␟1␞a␄")
+  end
+
+  it "mixes primitives with composed methods" do
+    buf = C0::Builder.build do |b|
+      b.rs("a")
+      b.field("b")
+      b.record
+      b.us("c")
+      b.gs("g")
+      b.key("k", "v")
+      b.group("h", ["h"])
+      b.field("x")
+    end
+    buf.should eq C0::Pretty.parse("␞a␟b␞␟c␝g␞␁k␟v␝h␁␞h␞x")
+    expect_raises(C0::Error) { C0::Builder.build { |b| b.can } }
+  end
+
+  it "writes the same bytes through either layer" do
+    hi = C0::Builder.build do |b|
+      b.syn(shape: "tabular")
+      b.group("users", ["name", "amount"]) { b.record("Alice", "1502.30"); b.record("Bob", "3 40") }
+      b.group("cfg")
+      b.map({"host" => "localhost", "port" => "5432"})
+      b.eot
+    end
+    lo = C0::Builder.build do |b|
+      b.syn.soh("shape").us("tabular")
+      b.gs("users").soh.rs("name").us("amount").rs("Alice").us("1502.30").rs("Bob").us("3 40")
+      b.gs("cfg").rs.soh("host").us("localhost").soh("port").us("5432").eot
+    end
+    lo.should eq hi
+    C0.canonical?(C0::Document.new(lo).body.raw).should be_true
   end
 end
 
