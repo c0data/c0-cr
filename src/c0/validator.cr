@@ -443,6 +443,7 @@ module C0
           segs = inside.size == 0 ? [] of Bytes : split_us(inside)
           raise SyntaxError.new("reference path with an empty segment", start) if segs.any? { |s| s.size == 0 }
           raise SyntaxError.new("reference path with more than three segments", start) if segs.size > 3
+          raise SyntaxError.new("reference path segment is not a name", start) unless segs.all? { |s| C0.name?(s) }
           not_canonical("group reference written as text") if segs.size == 1
         else
           pos = Scan.plain(@buf, pos, stop)
