@@ -11,7 +11,7 @@ module C0
   #   end
   #
   # Two layers. The primitives are one method per code (`fs`, `gs`, `rs`,
-  # `us`, `soh`, `dle`, `can`, `bel`, `enq`, `syn`, `eot`, `etb`, `em`); each
+  # `us`, `sub`, `soh`, `dle`, `can`, `bel`, `enq`, `syn`, `eot`, `etb`, `em`); each
   # writes its code and, when given, what grammatically follows it, so a chain
   # reads like the bytes:
   #
@@ -87,6 +87,14 @@ module C0
       @io.write_byte(US)
       write_value(value) if value
       @units += 1
+      self
+    end
+
+    # SUB and, when given, the new side of a substitution. C0-DIFF only:
+    # `rs("old").sub("new")` is a replace-all; in a data body SUB is an error.
+    def sub(value : String | Bytes | Nil = nil) : self
+      @io.write_byte(SUB)
+      write_value(value) if value
       self
     end
 

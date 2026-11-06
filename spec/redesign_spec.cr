@@ -153,6 +153,7 @@ describe "Builder" do
     g.call(C0::Builder.build { |b| b.bel.gs("old").rs("1").gs("new").rs("2") }).should eq C0::Pretty.parse("␇␝old␞1␝new␞2")
     g.call(C0::Builder.build { |b| b.gs.gs("sub").rs.enq("users").us.enq("users", "1") }).should eq C0::Pretty.parse("␝␝sub␞␅users␟␅␂users␟1␃")
     g.call(C0::Builder.build { |b| b.syn.soh("version").us("1").rs("a").eot }).should eq C0::Pretty.parse("␖␁version␟1␞a␄")
+    g.call(C0::Builder.build { |b| b.fs("f").rs("old").sub("new").gs("x").us("10").sub("20") }).should eq C0::Pretty.parse("␜f␞old␚new␝x␟10␚20")
   end
 
   it "mixes primitives with composed methods" do
