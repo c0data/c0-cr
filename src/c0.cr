@@ -1,5 +1,5 @@
 module C0
-  VERSION = "1.0.0-dev"
+  VERSION = "0.12.0"
 
   # Assigned C0 control codes (DESIGN.md "Assigned Control Codes")
   SOH = 0x01_u8 # Heading: a key for the value after it, or SOH RS a header row
