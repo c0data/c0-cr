@@ -518,10 +518,12 @@ module C0
         segs << inside[s...inside.size]
         raise SyntaxError.new("reference path with more than three segments", p) if segs.size > 3
         raise SyntaxError.new("reference path with an empty segment", p) if segs.any?(&.empty?)
+        raise SyntaxError.new("reference path segment is not a name", p) unless segs.all? { |s| C0.name?(s) }
         Reference.new(segs)
       else
         name = C0.trim(t[p...t.size])
         raise SyntaxError.new("reference without a name", p) if name.empty?
+        raise SyntaxError.new("reference name is not a name", p) unless C0.name?(name)
         Reference.new([name])
       end
     end

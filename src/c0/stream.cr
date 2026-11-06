@@ -184,6 +184,8 @@ module C0
           b = ptr[pos]
           if b == EOT
             pos += 1
+          elsif b == EM
+            return false # the raw region is not data of the log
           elsif b == BEL
             p2 = Scan.layout(@buf, pos + 1, len)
             return true if p2 < len && ptr[p2] < 0x20_u8 && ptr[p2] != STX # a dead element is data

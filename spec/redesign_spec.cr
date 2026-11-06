@@ -121,6 +121,22 @@ describe "Document" do
   end
 end
 
+describe "Reference" do
+  it "requires every path segment to be a name" do
+    expect_raises(C0::SyntaxError) { C0::Reference.parse(C0::Pretty.parse("␅␂a␟ b␃")) }
+    expect_raises(C0::SyntaxError) { C0::Reference.parse(C0::Pretty.parse("␅␂a␟b␊c␃")) }
+    C0::Reference.parse(C0::Pretty.parse("␅␂a␟b c␃")).path.size.should eq(2)
+  end
+end
+
+describe "Stream tail" do
+  it "is not torn when only EM and a blob follow the last commit" do
+    r = C0::Stream::Reader.new(C0::Pretty.parse("␞a␗␙raw bytes"))
+    r.torn?.should be_false
+    C0::Stream::Reader.new(C0::Pretty.parse("␞a␗␞b")).torn?.should be_true
+  end
+end
+
 describe "Builder" do
   it "refuses an empty note" do
     expect_raises(ArgumentError) { C0::Builder.build { |b| b.record("a"); b.note("") } }
