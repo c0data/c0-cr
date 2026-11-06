@@ -168,6 +168,7 @@ describe "Builder" do
     end
     buf.should eq C0::Pretty.parse("␞a␟b␞␟c␝g␞␁k␟v␝h␁␞h␞x")
     expect_raises(C0::Error) { C0::Builder.build { |b| b.can } }
+    expect_raises(C0::Error) { C0::Builder.build { |b| b.rs.enq("a", "b", "c", "d") } }
   end
 
   it "writes the same bytes through either layer" do

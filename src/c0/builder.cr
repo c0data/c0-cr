@@ -130,6 +130,7 @@ module C0
 
     # ENQ and a reference: a group name, or a path of two or three names.
     def enq(*path : String) : self
+      raise Error.new("a reference path has one to three segments") unless 1 <= path.size <= 3
       @io.write_byte(ENQ)
       if path.size == 1
         C0.write_name(@io, path[0].to_slice)
