@@ -145,6 +145,15 @@ describe "Supersession" do
     C0.canonical?(C0::Pretty.parse("␞a␚␟b")).should be_true
     expect_raises(C0::SyntaxError) { C0.validate(C0::Pretty.parse("␝g␚␞x")) }
   end
+
+  it "reports a body whose every element is dead as an empty body" do
+    body = C0::Body.new(C0::Pretty.parse("␇␜b␞2"))
+    body.files.size.should eq(1)
+    body.files[0].leading?.should be_true
+    body.name.should eq(Bytes.empty)
+    body.groups.should be_empty
+    C0::Body.new(C0::Pretty.parse("␇␜b␞2␇␜c␞3")).files.size.should eq(1)
+  end
 end
 
 describe "Stream tail" do

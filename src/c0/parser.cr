@@ -337,6 +337,9 @@ module C0
         end
       end
       files << file unless dead_file || (file.leading? && file.groups.empty? && !files.empty?)
+      # A body whose every element is dead is an empty body: one empty
+      # leading file, so `files` is never empty.
+      files << FileView.new(@buf, 0, 0, Array(Group).new, leading: true) if files.empty?
       {files, pos}
     end
 
