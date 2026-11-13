@@ -122,10 +122,28 @@ describe "Document" do
 end
 
 describe "Reference" do
-  it "requires every path segment to be a name" do
-    expect_raises(C0::SyntaxError) { C0::Reference.parse(C0::Pretty.parse("␅␂a␟ b␃")) }
-    expect_raises(C0::SyntaxError) { C0::Reference.parse(C0::Pretty.parse("␅␂a␟b␊c␃")) }
-    C0::Reference.parse(C0::Pretty.parse("␅␂a␟b c␃")).path.size.should eq(2)
+  it "is a group name or a pattern, never text" do
+    expect_raises(C0::SyntaxError) { C0::Reference.parse(C0::Pretty.parse("␅␂a␟b␃")) }
+    expect_raises(C0::SyntaxError) { C0::Reference.parse(C0::Pretty.parse("␅␐␝a␞␂ b␃␘")) }
+    r = C0::Reference.parse(C0::Pretty.parse("␅␐␝a␞b c␟d␘"))
+    r.name.should be_nil
+    r.path.map { |x| String.new(x) }.should eq(["a", "b c", "d"])
+    r.group?.should be_false
+    C0::Reference.parse(C0::Pretty.parse("␅␐␝tags␘")).group_name.should eq("tags".to_slice)
+    C0::Reference.parse(C0::Pretty.parse("␅tags")).group?.should be_true
+  end
+end
+
+describe "Supersession" do
+  it "drops the superseded element from the model and keeps it in the bytes" do
+    doc = C0::Document.new(C0::Pretty.parse("␝g␞a␟b␚␟c␚␞x␟y"))
+    doc.group("g").records.size.should eq(1)
+    doc.group("g").record(0).values.should eq(["x".to_slice, "y".to_slice])
+    rec = C0::Body.new(C0::Pretty.parse("␞a␚␟b␟c")).record(0)
+    rec.values.should eq(["b".to_slice, "c".to_slice])
+    rec.units.map { |u| {String.new(u.value), u.superseded?} }.should eq([{"a", true}, {"b", false}, {"c", false}])
+    C0.canonical?(C0::Pretty.parse("␞a␚␟b")).should be_true
+    expect_raises(C0::SyntaxError) { C0.validate(C0::Pretty.parse("␝g␚␞x")) }
   end
 end
 
@@ -151,9 +169,9 @@ describe "Builder" do
     g.call(C0::Builder.build { |b| b.rs("cfg").us.dle.rs.soh("b").us("2").can }).should eq C0::Pretty.parse("␞cfg␟␐␞␁b␟2␘")
     g.call(C0::Builder.build { |b| b.bel("checked").rs("x") }).should eq C0::Pretty.parse("␇checked␞x")
     g.call(C0::Builder.build { |b| b.bel.gs("old").rs("1").gs("new").rs("2") }).should eq C0::Pretty.parse("␇␝old␞1␝new␞2")
-    g.call(C0::Builder.build { |b| b.gs.gs("sub").rs.enq("users").us.enq("users", "1") }).should eq C0::Pretty.parse("␝␝sub␞␅users␟␅␂users␟1␃")
+    g.call(C0::Builder.build { |b| b.gs.gs("sub").rs.enq("users").us.enq { b.gs("users").rs("1") } }).should eq C0::Pretty.parse("␝␝sub␞␅users␟␅␐␝users␞1␘")
     g.call(C0::Builder.build { |b| b.syn.soh("version").us("1").rs("a").eot }).should eq C0::Pretty.parse("␖␁version␟1␞a␄")
-    g.call(C0::Builder.build { |b| b.fs("f").rs("old").sub("new").gs("x").us("10").sub("20") }).should eq C0::Pretty.parse("␜f␞old␚new␝x␟10␚20")
+    g.call(C0::Builder.build { |b| b.fs("f").rs("old").sub.rs("new").gs("x").rs("10").sub.us("20") }).should eq C0::Pretty.parse("␜f␞old␚␞new␝x␞10␚␟20")
   end
 
   it "mixes primitives with composed methods" do
@@ -169,7 +187,7 @@ describe "Builder" do
     end
     buf.should eq C0::Pretty.parse("␞a␟b␞␟c␝g␞␁k␟v␝h␁␞h␞x")
     expect_raises(C0::Error) { C0::Builder.build { |b| b.can } }
-    expect_raises(C0::Error) { C0::Builder.build { |b| b.rs.enq("a", "b", "c", "d") } }
+    expect_raises(C0::Error) { C0::Builder.build { |b| b.rs.enq("") } }
   end
 
   it "writes the same bytes through either layer" do
@@ -204,7 +222,7 @@ end
 
 describe "CSV" do
   it "writes a reference as its path and picks a named group" do
-    buf = C0::Pretty.parse("␝a␞1␝links␁␞user␟tag␞␅␂users␟1␃␟␅tags")
+    buf = C0::Pretty.parse("␝a␞1␝links␁␞user␟tag␞␅␐␝users␞1␘␟␅tags")
     C0::CSV.to_csv(buf, "links").should eq("user,tag\nusers/1,tags\n")
   end
 

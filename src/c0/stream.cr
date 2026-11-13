@@ -8,27 +8,47 @@ module C0
   #   r.torn?          # => false
   #   r.each_record { |rec| ... }
   module Stream
+    # A committed block that is not well-formed (DESIGN.md, Damaged
+    # Blocks). `resume_offset` is where reading can go on, after the
+    # block's ETB and payload.
+    class DamagedBlockError < C0::Error
+      getter index : Int32
+      getter resume_offset : Int32
+
+      def initialize(@index : Int32, @resume_offset : Int32)
+        super("block #{@index} is damaged; reading can resume at byte #{@resume_offset}")
+      end
+    end
+
     # Scans a buffer for commits. An unescaped ETB is always a commit,
-    # even inside open text or a level; such a block is damaged and
-    # yields nothing. The tail after the last commit is torn unless it
-    # holds only layout, notes or EOT.
-    struct Reader
+    # even inside open text or a level. A committed block that is not
+    # well-formed, cut by its ETB or holding any other error, is damaged:
+    # nothing in it is delivered, and by default the reader delivers the
+    # records before it and then raises DamagedBlockError; with
+    # `continue_past_damage` it reads on past the block. The tail after
+    # the last commit is torn unless it holds only layout, notes or EOT.
+    class Reader
       getter buf : Bytes
       getter committed_end : Int32
       getter blocks : Array({Int32, Int32})   # [start, end) of each committed block (ETB excluded)
       getter damaged : Array(Int32)           # indexes of damaged blocks
       getter? torn : Bool
+      getter? continue_past_damage : Bool
 
-      def initialize(@buf : Bytes)
+      def initialize(@buf : Bytes, @continue_past_damage : Bool = false)
         @committed_end = 0
         @blocks = Array({Int32, Int32}).new
         @damaged = Array(Int32).new
         @torn = false
+        @container = nil
         scan
+        parse_committed
       end
 
-      def self.read(path : Path | String) : Reader
-        new(File.read(path).to_slice)
+      @container : Container?
+
+      def self.read(path : Path | String, continue_past_damage : Bool = false) : Reader
+        new(File.read(path).to_slice, continue_past_damage)
       end
 
       def committed : Bytes
@@ -56,10 +76,21 @@ module C0
         @blocks.size.times { |i| yield block(i) }
       end
 
-      # The committed region as a document (heading skipped), undamaged
-      # blocks only.
+      # Offset after a block's ETB and payload: the start of the next block.
+      def block_end(i : Int32) : Int32
+        i + 1 < @blocks.size ? @blocks[i + 1][0] : @committed_end
+      end
+
+      # The committed region as documents, damaged blocks left out. Raises
+      # DamagedBlockError when a block is damaged, unless continuing.
+      def container : Container
+        check_damage
+        @container.not_nil!
+      end
+
+      # The first document of the committed region.
       def document : Document
-        Document.new(undamaged_bytes)
+        container.first
       end
 
       def body : Body
@@ -72,8 +103,26 @@ module C0
         b.groups.first? || Group.new(Bytes.empty, 0, 0, 0, nil, Array(Record).new)
       end
 
+      # Every committed record in order, up to the first damaged block;
+      # then DamagedBlockError, unless continuing, in which case every
+      # record of every sound block.
       def each_record(& : Record ->) : Nil
-        body.groups.each { |g| g.records.each { |r| yield r } }
+        c = @container.not_nil!
+        limit = Int32::MAX
+        unless @continue_past_damage
+          if d = @damaged.first?
+            limit = @blocks[d][0]
+          end
+        end
+        c.documents.each do |doc|
+          doc.body.groups.each do |g|
+            g.records.each do |r|
+              check_damage if r.offset >= limit
+              yield r
+            end
+          end
+        end
+        check_damage
       end
 
       def records : Array(Record)
@@ -82,14 +131,40 @@ module C0
         out
       end
 
-      # Committed bytes with damaged blocks and payloads removed.
-      private def undamaged_bytes : Bytes
-        io = IO::Memory.new
-        @blocks.each_with_index do |(s, e), i|
-          next if @damaged.includes?(i)
-          io.write(@buf[s...e])
+      private def check_damage : Nil
+        return if @continue_past_damage
+        if d = @damaged.first?
+          raise DamagedBlockError.new(d, block_end(d))
         end
-        io.to_slice
+      end
+
+      # Parse the committed region. Any error inside a committed block
+      # marks that block damaged; the region is then parsed again with the
+      # block skipped, so what follows is read in the context before it.
+      private def parse_committed : Nil
+        skip = Hash(Int32, Int32).new
+        loop do
+          parser = Parser.new(@buf, skip: skip)
+          begin
+            @container = Container.new(@buf, stop: @committed_end, parser: parser)
+            break
+          rescue e : SyntaxError
+            i = block_at(e.position)
+            raise e if i.nil? || skip.has_key?(@blocks[i][0])
+            @damaged << i
+            skip[@blocks[i][0]] = block_end(i)
+          end
+        end
+        @damaged.sort!
+      end
+
+      # The block holding byte `pos` of the committed region.
+      private def block_at(pos : Int32) : Int32?
+        found = nil
+        @blocks.each_with_index do |(s, _e), i|
+          found = i if s <= pos
+        end
+        found
       end
 
       private def scan : Nil
@@ -108,7 +183,7 @@ module C0
             elsif b == ETX
               in_text = false
             elsif b == ETB
-              commit(block_start, pos, damaged: true)
+              commit(block_start, pos)
               pos = payload_end(pos + 1)
               block_start = pos
               in_text = false
@@ -131,7 +206,7 @@ module C0
             elsif b == CAN
               depth -= 1 if depth > 0
             elsif b == ETB
-              commit(block_start, pos, damaged: depth > 0)
+              commit(block_start, pos)
               pos = payload_end(pos + 1)
               block_start = pos
               depth = 0
@@ -147,9 +222,8 @@ module C0
         @torn = torn_tail?
       end
 
-      private def commit(start : Int32, stop : Int32, damaged : Bool) : Nil
+      private def commit(start : Int32, stop : Int32) : Nil
         @blocks << {start, stop}
-        @damaged << (@blocks.size - 1) if damaged
       end
 
       # After an ETB: skip its payload and return committed_end (which

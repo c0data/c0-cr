@@ -90,11 +90,10 @@ module C0
       self
     end
 
-    # SUB and, when given, the new side of a substitution. C0-DIFF only:
-    # `rs("old").sub("new")` is a replace-all; in a data body SUB is an error.
-    def sub(value : String | Bytes | Nil = nil) : self
+    # SUB: the element before the next separator or opener is superseded
+    # by the element after it, at that code's grain (`old␚␟new`).
+    def sub : self
       @io.write_byte(SUB)
-      write_value(value) if value
       self
     end
 
@@ -136,22 +135,21 @@ module C0
       self
     end
 
-    # ENQ and a reference: a group name, or a path of two or three names.
-    def enq(*path : String) : self
-      raise Error.new("a reference path has one to three segments") unless 1 <= path.size <= 3
+    # ENQ and a group name: a group reference.
+    def enq(name : String) : self
+      raise Error.new("a reference needs a name") if name.empty?
       @io.write_byte(ENQ)
-      if path.size == 1
-        C0.write_name(@io, path[0].to_slice)
-      else
-        @io.write_byte(STX)
-        path.each_with_index do |seg, i|
-          @io.write_byte(US) if i > 0
-          raise Error.new("reference segment is not a name") unless C0.name?(seg.to_slice) && !seg.empty?
-          @io.write(seg.to_slice)
-        end
-        @io.write_byte(ETX)
-      end
+      C0.write_name(@io, name.to_slice)
       self
+    end
+
+    # ENQ and a pattern: a level built in the block, the target with its
+    # values left out (`enq { |b| b.gs("tags").rs("001").us("label") }`).
+    def enq(& : ->) : self
+      @io.write_byte(ENQ)
+      dle
+      yield
+      can
     end
 
     # SYN: start a document. Heading pairs follow as `soh(key).us(value)`.
@@ -347,10 +345,34 @@ module C0
       list(items)
     end
 
-    # A reference as the next unit: a group name, or a path of names.
-    def ref(*path : String) : self
+    # A group reference as the next unit.
+    def ref(name : String) : self
       next_unit
-      enq(*path)
+      enq(name)
+    end
+
+    # A reference to a record, or a field of it, as the next unit: the
+    # pattern `␅␐␝group␞record␟field␘`.
+    def ref(group : String, record : String, field : String? = nil) : self
+      next_unit
+      enq do
+        gs(group)
+        rs(record)
+        us(field) if field
+      end
+    end
+
+    # A reference as the next unit, its pattern built in the block.
+    def ref(& : ->) : self
+      next_unit
+      enq { yield }
+    end
+
+    # A superseded unit: `old` superseded by `new`, written `old␚␟new`.
+    def supersede(old_value : String | Bytes, new_value : String | Bytes) : self
+      field(old_value)
+      sub
+      field(new_value)
     end
 
     # ---- comments ----------------------------------------------------------

@@ -24,12 +24,12 @@ private def scalar?(f : ::JSON::Any) : Bool
   !f.as_s?.nil? || (f.as_h? && f["hex"]?) ? true : false
 end
 
-# Flatten a group list with "sections" into (depth, group) pairs.
+# Flatten a group list with "sections" into (depth, group) pairs. A
+# section with a null name is a skipped depth: no group stands there.
 private def flat_groups(groups : Array(::JSON::Any), depth : Int32 = 1) : Array({Int32, ::JSON::Any})
   out = Array({Int32, ::JSON::Any}).new
   groups.each do |g|
-    d = g["name"].as_s.empty? && depth == 1 && g["headers"]?.try(&.raw).nil? && false ? 0 : depth
-    out << {depth, g}
+    out << {depth, g} unless g["name"].as_s?.nil?
     if secs = g["sections"]?
       out.concat(flat_groups(secs.as_a, depth + 1))
     end
@@ -45,9 +45,11 @@ private def check_value(rec : C0::Record, i : Int32, f : ::JSON::Any) : Nil
   elsif ref = f["ref"]?
     r = rec.ref(i)
     if s = ref.as_s?
-      r.path.should eq([s.to_slice])
+      r.name.should eq(s.to_slice)
+      r.pattern.should be_nil
     else
-      r.path.should eq(ref.as_a.map { |x| x.as_s.to_slice })
+      r.name.should be_nil
+      check_body(r.pattern.not_nil!, ref["level"])
     end
   else
     raise "unknown value form #{f}"
@@ -119,7 +121,8 @@ end
 private def check_files(body : C0::Body, files : Array(::JSON::Any)) : Nil
   body.files.size.should eq(files.size)
   files.each_with_index do |f, i|
-    String.new(body.files[i].name).should eq(f["name"].as_s)
+    String.new(body.files[i].name).should eq(f["name"].as_s? || "")
+    body.files[i].leading?.should eq(f["name"].as_s?.nil?)
     check_groups(body.files[i].groups, f["groups"].as_a)
   end
 end
@@ -133,7 +136,7 @@ private def check_heading(h : C0::Heading, e : ::JSON::Any) : Nil
       h.pairs[i][1].should eq(scalar_bytes(v))
     elsif lvl = v["level"]?
       raw = h.pairs[i][1]
-      body = C0::Body.new(raw, 1, C0::Scan.level(raw, 0) - 1)
+      body = C0::Body.new(raw, 1, C0::Scan.level(raw, 0) - 1, level: true)
       check_body(body, lvl)
     end
   end
@@ -150,12 +153,7 @@ private def build_value(b : C0::Builder, f : ::JSON::Any) : Nil
     if s = ref.as_s?
       b.ref(s)
     else
-      segs = ref.as_a.map(&.as_s)
-      case segs.size
-      when 1 then b.ref(segs[0])
-      when 2 then b.ref(segs[0], segs[1])
-      else        b.ref(segs[0], segs[1], segs[2])
-      end
+      b.ref { build_body(b, ref["level"]) }
     end
   elsif m = f["map"]?
     b.level { build_record(b, ::JSON::Any.new({"keys" => m})) }
@@ -184,15 +182,18 @@ private def build_record(b : C0::Builder, r : ::JSON::Any) : Nil
   end
 end
 
-private def build_groups(b : C0::Builder, groups : Array(::JSON::Any)) : Nil
+private def build_groups(b : C0::Builder, groups : Array(::JSON::Any), depth : Int32 = 1) : Nil
   groups.each_with_index do |g, i|
     headers = g["headers"].as_a?.try(&.map(&.as_s))
-    if g["name"].as_s.empty? && i == 0
+    if g["name"].as_s? == "" && i == 0 && depth == 1
       b.header(headers) if headers # the unnamed leading group: no GS
-    else
-      b.group(g["name"].as_s, headers)
+    elsif name = g["name"].as_s?
+      b.group(name, headers, depth)
     end
     g["records"].as_a.each { |r| build_record(b, r) }
+    if secs = g["sections"]?
+      build_groups(b, secs.as_a, depth + 1)
+    end
   end
 end
 
@@ -202,6 +203,11 @@ private def build_body(b : C0::Builder, e : ::JSON::Any) : Nil
     e["records"].as_a.each { |r| build_record(b, r) }
   elsif e["groups"]?
     build_groups(b, e["groups"].as_a)
+  elsif files = e["files"]?
+    files.as_a.each do |f|
+      b.fs(f["name"].as_s) unless f["name"].as_s?.nil?
+      build_groups(b, f["groups"].as_a)
+    end
   end
 end
 
@@ -375,7 +381,7 @@ describe "conformance" do
     conformance_cases("stream.json").each do |c|
       it c["name"].as_s do
         bytes = c["bytes"].as_s.hexbytes
-        reader = C0::Stream::Reader.new(bytes)
+        reader = C0::Stream::Reader.new(bytes, continue_past_damage: true)
         reader.committed_end.should eq(c["committed_end"].as_i)
         reader.torn?.should eq(c["torn"].as_bool)
         expected_blocks = c["blocks"].as_a.map(&.as_s)

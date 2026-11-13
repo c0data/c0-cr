@@ -1,7 +1,8 @@
 module C0
   # Zero-copy navigator for a document body: the bytes between a heading
-  # and EOT, or the inside of a nested level. Indexes files, groups,
-  # header rows and records once; everything it returns is a slice into
+  # and EOT, or the inside of a nested level. The structure (files, groups,
+  # header rows, records) is built once by the Parser with dead and
+  # superseded elements dropped; everything it returns is a slice into
   # the original buffer.
   #
   # Records before the first GS of a file form an unnamed group; records
@@ -12,9 +13,17 @@ module C0
     getter stop : Int32
     getter files : Array(FileView)
 
-    def initialize(@buf : Bytes, @start : Int32 = 0, @stop : Int32 = buf.size.to_i32)
-      @files = Array(FileView).new
-      index
+    # Parse the body in buf[start...stop]. `level` reads it as the inside
+    # of a nested level (no commits).
+    def initialize(@buf : Bytes, @start : Int32 = 0, @stop : Int32 = buf.size.to_i32, level : Bool = false)
+      parser = Parser.new(@buf)
+      @files, pos = parser.body(@start, @stop, level: level)
+      pos = Scan.layout(@buf, pos, @stop)
+      raise SyntaxError.new("unexpected byte in body", pos) if pos < @stop
+    end
+
+    # A body already parsed (used by the Parser).
+    def initialize(@buf : Bytes, @start : Int32, @stop : Int32, @files : Array(FileView))
     end
 
     # All groups of all files, in order.
@@ -76,7 +85,7 @@ module C0
 
     # Whether the body is just records: one unnamed file, one unnamed group.
     def bare? : Bool
-      @files.size == 1 && @files[0].name.empty? && @files[0].groups.size <= 1 &&
+      @files.size == 1 && @files[0].leading? && @files[0].groups.size <= 1 &&
         (@files[0].groups.empty? || @files[0].groups[0].depth == 0)
     end
 
@@ -87,160 +96,18 @@ module C0
     def raw : Bytes
       @buf[@start...@stop]
     end
-
-    # ------------------------------------------------------------------
-    private def index : Nil
-      ptr = @buf.to_unsafe
-      pos = Scan.layout(@buf, @start, @stop)
-      # leading unnamed file
-      file_start = pos
-      file = FileView.new(@buf, 0, 0, Array(Group).new)
-      pos = index_part(pos, file)
-      @files << file unless file.groups.empty? && pos < @stop && (ptr[pos] == FS || dead_fs?(pos))
-      @files << file if @files.empty? && !(pos < @stop && (ptr[pos] == FS || dead_fs?(pos)))
-      while pos < @stop
-        b = ptr[pos]
-        dead = false
-        if b == BEL && dead_fs?(pos)
-          dead = true
-          pos = Scan.layout(@buf, pos + 1, @stop)
-          b = FS
-        end
-        break unless b == FS
-        pos = Scan.layout(@buf, pos + 1, @stop)
-        ns = pos
-        pos = Scan.plain(@buf, pos, @stop)
-        ne = pos
-        if dead
-          # a dead file line is read as if absent: what follows belongs to
-          # the file before it, its leading items to that file's last group
-          prev = @files.last?
-          unless prev
-            prev = file
-            @files << file
-          end
-          pos = index_part(pos, prev, prev.groups.last?)
-        else
-          f = FileView.new(@buf, ns, ne, Array(Group).new)
-          pos = index_part(pos, f)
-          @files << f
-        end
-      end
-      @files << FileView.new(@buf, 0, 0, Array(Group).new) if @files.empty?
-    end
-
-    private def dead_fs?(pos : Int32) : Bool
-      ptr = @buf.to_unsafe
-      return false unless pos < @stop && ptr[pos] == BEL
-      p2 = Scan.layout(@buf, pos + 1, @stop)
-      p2 < @stop && ptr[p2] == FS
-    end
-
-    # Index one part: leading items (unnamed group), then groups. Returns
-    # the position of the next FS (or dead FS), or @stop.
-    private def index_part(pos : Int32, file : FileView, cont : Group? = nil) : Int32
-      ptr = @buf.to_unsafe
-      # leading items: the unnamed group, or `cont` when continuing after a
-      # dead file line
-      g = cont || Group.new(@buf, 0, 0, 0, nil, Array(Record).new)
-      pos = index_group_contents(pos, g)
-      file.groups << g if cont.nil? && (g.header || !g.records.empty?)
-      current = g
-      while pos < @stop
-        b = ptr[pos]
-        dead = false
-        if b == BEL
-          p2 = Scan.layout(@buf, pos + 1, @stop)
-          if p2 < @stop && ptr[p2] == GS
-            dead = true
-            pos = p2
-            b = GS
-          else
-            break
-          end
-        end
-        break unless b == GS
-        depth = 0
-        while pos < @stop && (ptr[pos] == GS || C0.layout?(ptr[pos]))
-          depth += 1 if ptr[pos] == GS
-          pos += 1
-        end
-        ns = pos
-        pos = Scan.plain(@buf, pos, @stop)
-        ne = pos
-        if dead
-          # a dead group line: what follows still belongs to the group before
-          pos = index_group_contents(pos, current)
-          file.groups << current if current.same?(g) && !file.groups.any?(&.same?(g)) && (g.header || !g.records.empty?)
-        else
-          grp = Group.new(@buf, depth, ns, ne, nil, Array(Record).new)
-          pos = index_group_contents(pos, grp)
-          file.groups << grp
-          current = grp
-        end
-      end
-      pos
-    end
-
-    # After a group label (or at the start of a part): notes, header row,
-    # items. Returns position of the next GS/FS/BEL-dead-GS/FS or stop.
-    private def index_group_contents(pos : Int32, grp : Group) : Int32
-      ptr = @buf.to_unsafe
-      first_item = true
-      loop do
-        pos = Scan.layout(@buf, pos, @stop)
-        break if pos >= @stop
-        b = ptr[pos]
-        if b == RS
-          first_item = false
-          rs = pos + 1
-          pos = Scan.record_end(@buf, rs, @stop)
-          grp.records << Record.new(@buf, rs, trim_end(rs, pos))
-        elsif b == SOH
-          p2 = Scan.layout(@buf, pos + 1, @stop)
-          raise SyntaxError.new("keyed unit outside a record", pos) unless p2 < @stop && ptr[p2] == RS
-          raise SyntaxError.new("header row not at the start of its group", pos) unless first_item
-          first_item = false
-          hs = p2 + 1
-          pos = Scan.record_end(@buf, hs, @stop)
-          grp.header = Record.new(@buf, hs, trim_end(hs, pos))
-        elsif b == ETB
-          pos = Scan.plain(@buf, Scan.layout(@buf, pos + 1, @stop), @stop)
-        elsif b == BEL
-          p2 = Scan.layout(@buf, pos + 1, @stop)
-          if p2 >= @stop || ptr[p2] >= 0x20_u8 || ptr[p2] == STX
-            pos = Scan.comment(@buf, pos, @stop) # a note
-          elsif ptr[p2] == RS || ptr[p2] == SOH
-            pos = Scan.comment(@buf, pos, @stop) # dead record / header row / keyed unit
-            first_item = false if ptr[p2] == RS
-          else
-            break # dead GS or FS: the caller's business
-          end
-        else
-          break
-        end
-      end
-      pos
-    end
-
-    @[AlwaysInline]
-    private def trim_end(start : Int32, stop : Int32) : Int32
-      ptr = @buf.to_unsafe
-      while stop > start && C0.layout?(ptr[stop - 1])
-        stop -= 1
-      end
-      stop
-    end
   end
 
-  # A file within a body: its name and groups.
+  # A file within a body: its name and groups. The leading file is the
+  # unnamed one before the first FS.
   struct FileView
     @buf : Bytes
     @name_start : Int32
     @name_end : Int32
     getter groups : Array(Group)
+    getter? leading : Bool
 
-    def initialize(@buf : Bytes, @name_start : Int32, @name_end : Int32, @groups : Array(Group))
+    def initialize(@buf : Bytes, @name_start : Int32, @name_end : Int32, @groups : Array(Group), @leading : Bool = false)
     end
 
     def name : Bytes
@@ -322,7 +189,24 @@ module C0
 
   alias Table = Group
 
-  # A record: positional or keyed. Zero-copy accessors.
+  # One unit of a positional record as written: its raw bytes and whether
+  # the unit after it supersedes it (`old␚␟new`).
+  struct Unit
+    getter raw : Bytes
+    getter? superseded : Bool
+
+    def initialize(@raw : Bytes, @superseded : Bool)
+    end
+
+    # Logical value.
+    def value : Bytes
+      C0.value(@raw)
+    end
+  end
+
+  # A record: positional or keyed. Zero-copy accessors. The positional and
+  # keyed accessors report the record's **result**: a superseded unit is
+  # not among them; `units` lists every unit as written.
   struct Record
     @buf : Bytes
     @start : Int32
@@ -337,14 +221,19 @@ module C0
       @buf[@start...@end]
     end
 
+    # Offset of the record's first byte in the buffer.
+    def offset : Int32
+      @start
+    end
+
     # Whether the record is keyed (its first unit is an SOH).
     def keyed? : Bool
       ptr = @buf.to_unsafe
       p = Scan.layout(@buf, @start, @end)
-      while p < @end && ptr[p] == BEL
+      while p < @end && (ptr[p] == BEL || ptr[p] == SUB)
         p2 = Scan.layout(@buf, p + 1, @end)
         return true if p2 < @end && ptr[p2] == SOH
-        break if p2 < @end && ptr[p2] < 0x20_u8 && ptr[p2] != STX && ptr[p2] != DLE
+        break if p2 >= @end || ptr[p] == SUB || (ptr[p2] < 0x20_u8 && ptr[p2] != STX)
         p = Scan.layout(@buf, Scan.comment(@buf, p, @end), @end)
       end
       p < @end && ptr[p] == SOH
@@ -352,7 +241,7 @@ module C0
 
     # ---- positional -----------------------------------------------------
 
-    # Raw slice of unit n (layout at its edges included).
+    # Raw slice of unit n of the result (layout at its edges included).
     def field(n : Int32) : Bytes
       each_unit_range do |i, s, e|
         return @buf[s...e] if i == n
@@ -369,6 +258,13 @@ module C0
     def fields : Array(Bytes)
       out = Array(Bytes).new
       each_unit_range { |i, s, e| out << @buf[s...e] }
+      out
+    end
+
+    # Every unit as written, superseded ones included.
+    def units : Array(Unit)
+      out = Array(Unit).new
+      each_written_unit { |s, e, sup| out << Unit.new(@buf[s...e], sup) }
       out
     end
 
@@ -446,27 +342,45 @@ module C0
       t = C0.trim(raw)
       raise Error.new("unit is not a nested level") unless t.size > 0 && t[0] == DLE
       stop = Scan.level(t, 0)
-      Body.new(t, 1, stop - 1)
+      Body.new(t, 1, stop - 1, level: true)
     end
 
-    # Yields (index, start, end) for each positional unit.
-    private def each_unit_range(& : Int32, Int32, Int32 ->) : Nil
+    # Yields (start, end, superseded) for each positional unit as written.
+    private def each_written_unit(& : Int32, Int32, Bool ->) : Nil
+      return if keyed?
       ptr = @buf.to_unsafe
       pos = Scan.layout(@buf, @start, @end)
-      return if pos < @end && ptr[pos] == SOH
-      idx = 0
       unit_start = @start
       loop do
         pos = Scan.unit(@buf, pos, @end)
-        yield idx, unit_start, pos
-        break unless pos < @end && ptr[pos] == US
-        idx += 1
-        pos += 1
+        superseded = false
+        nxt = pos
+        if pos < @end && ptr[pos] == SUB
+          p2 = Scan.layout(@buf, pos + 1, @end)
+          if p2 < @end && ptr[p2] == US
+            superseded = true
+            nxt = p2
+          end
+        end
+        yield unit_start, pos, superseded
+        break unless nxt < @end && ptr[nxt] == US
+        pos = nxt + 1
         unit_start = pos
       end
     end
 
-    # Yields (key, key_start, key_end, value_start, value_end) per keyed unit.
+    # Yields (index, start, end) for each positional unit of the result.
+    private def each_unit_range(& : Int32, Int32, Int32 ->) : Nil
+      idx = 0
+      each_written_unit do |s, e, sup|
+        next if sup
+        yield idx, s, e
+        idx += 1
+      end
+    end
+
+    # Yields (key, key_start, key_end, value_start, value_end) per keyed
+    # unit of the result.
     private def each_keyed_range(& : Bytes, Int32, Int32, Int32, Int32 ->) : Nil
       ptr = @buf.to_unsafe
       pos = Scan.layout(@buf, @start, @end)
@@ -478,11 +392,19 @@ module C0
           raise SyntaxError.new("key without a value (no US)", ke) unless ke < @end && ptr[ke] == US
           vs = ke + 1
           ve = Scan.unit(@buf, vs, @end)
-          yield C0.trim(@buf[ks...ke]), ks, ke, vs, ve
+          superseded = false
           pos = ve
+          if ve < @end && ptr[ve] == SUB
+            p2 = Scan.layout(@buf, ve + 1, @end)
+            if p2 < @end && ptr[p2] == SOH
+              superseded = true
+              pos = p2
+            end
+          end
+          yield C0.trim(@buf[ks...ke]), ks, ke, vs, ve unless superseded
         elsif b == BEL
           pos = Scan.comment(@buf, pos, @end)
-        elsif C0.layout?(b)
+        elsif b == SUB || C0.layout?(b)
           pos += 1
         else
           return
@@ -491,57 +413,76 @@ module C0
     end
   end
 
-  # A reference: a group name, or a path of two or three segments.
+  # A reference (DESIGN.md, References): a group name written plain, or a
+  # pattern, a level that is one branch of the target with its values left
+  # out. The pattern is reported as the level it is written as.
   struct Reference
-    getter path : Array(Bytes)
+    # The group name of a plain reference, or nil for a pattern.
+    getter name : Bytes?
+    # The pattern of `ENQ DLE … CAN`, or nil for a plain reference.
+    getter pattern : Body?
 
-    def initialize(@path : Array(Bytes))
+    def initialize(@name : Bytes?, @pattern : Body?)
     end
 
+    # Parse a raw unit holding a reference (notes after it allowed).
     def self.parse(raw : Bytes) : Reference
       t = C0.trim(raw)
       raise Error.new("unit is not a reference") unless t.size > 0 && t[0] == ENQ
-      p = Scan.layout(t, 1)
-      if p < t.size && t[p] == STX
-        stop = Scan.text(t, p)
-        inside = C0.decode_text(t[(p + 1)...(stop - 1)])
-        segs = Array(Bytes).new
-        s = 0
-        i = 0
-        while i < inside.size
-          if inside[i] == US
-            segs << inside[s...i]
-            s = i + 1
-          end
-          i += 1
-        end
-        segs << inside[s...inside.size]
-        raise SyntaxError.new("reference path with more than three segments", p) if segs.size > 3
-        raise SyntaxError.new("reference path with an empty segment", p) if segs.any?(&.empty?)
-        raise SyntaxError.new("reference path segment is not a name", p) unless segs.all? { |s| C0.name?(s) }
-        Reference.new(segs)
-      else
-        name = C0.trim(t[p...t.size])
-        raise SyntaxError.new("reference without a name", p) if name.empty?
-        raise SyntaxError.new("reference name is not a name", p) unless C0.name?(name)
-        Reference.new([name])
+      ref, pos = Parser.new(t).reference(0, t.size)
+      pos = Scan.layout(t, pos, t.size)
+      while pos < t.size
+        raise SyntaxError.new("unexpected byte after a reference", pos) unless t[pos] == BEL
+        pos = Scan.layout(t, Scan.comment(t, pos), t.size)
       end
+      ref
     end
 
-    def group : Bytes
-      @path[0]
-    end
-
-    def record : Bytes?
-      @path[1]?
-    end
-
-    def field : Bytes?
-      @path[2]?
-    end
-
+    # Whether the reference names a group as a whole: a plain name, or a
+    # pattern that is a bare group line.
     def group? : Bool
-      @path.size == 1
+      return true if @name
+      p = @pattern.not_nil!
+      p.files[0].leading? && p.groups.size == 1 && p.groups[0].records.empty?
+    end
+
+    # The group named, when the reference names a group as a whole.
+    def group_name : Bytes?
+      return @name if @name
+      group? ? @pattern.not_nil!.groups[0].name : nil
+    end
+
+    # The steps of the pattern in walking order (file, groups, record id,
+    # field name, then the inner pattern's steps), or the group name alone.
+    # Informal: a keyed step contributes its key.
+    def path : Array(Bytes)
+      if n = @name
+        return [n]
+      end
+      out = Array(Bytes).new
+      p = @pattern.not_nil!
+      f = p.files[0]
+      out << f.name unless f.leading?
+      f.groups.each { |g| out << g.name unless g.depth == 0 }
+      if rec = f.groups.last.records[0]?
+        if rec.keyed?
+          out << rec.keys[0]
+        else
+          rec.fields.each_with_index do |raw, i|
+            if i < 2
+              out << C0.value(raw)
+            else
+              out.concat(Reference.new(nil, Record.level_of(raw)).path)
+            end
+          end
+        end
+      end
+      out
+    end
+
+    # Compatibility: the group name of a plain reference.
+    def group : Bytes
+      group_name || raise Error.new("reference is a pattern, not a group")
     end
   end
 end

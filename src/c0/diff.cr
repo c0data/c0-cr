@@ -1,14 +1,12 @@
 module C0
-  # C0-DIFF: atomic multi-file edits with anchored patterns (DIFF.md).
+  # C0DIFF: atomic multi-file edits with anchored patterns (DIFF.md). A
+  # diff is an ordinary document of `shape` `diff`: files of records, each
+  # record a pattern of units, with `old␚␟new` (supersession at the unit
+  # grain) as the substitution.
   #
   #   diff = C0::Diff.build do |d|
   #     d.file("greeting.txt") do
-  #       d.section { |s| s.anchor("Hello "); s.sub("world", "universe"); s.anchor("!") }
-  #     end
-  #     d.file("tally.rb") do
-  #       d.section { |s| s.anchor("def tally(items)") }
-  #       d.replace_all("count", "total")
-  #       d.section { |s| s.anchor("end") }
+  #       d.record { |r| r.anchor("Hello "); r.sub("world", "universe"); r.anchor("!") }
   #     end
   #   end
   #   C0::Diff.apply(diff, {"greeting.txt" => "Hello world!"})
@@ -28,113 +26,96 @@ module C0
       end
     end
 
-    # A section: one anchored pattern, plus the replace-alls that follow it.
-    struct Section
+    # One record: an anchored pattern.
+    struct Pattern
       getter units : Array(Unit)
-      getter replaces : Array({Bytes, Bytes})
 
-      def initialize(@units : Array(Unit), @replaces = Array({Bytes, Bytes}).new)
+      def initialize(@units : Array(Unit))
       end
 
+      # What the file must hold, once: anchors and superseded units.
       def search : Bytes
         io = IO::Memory.new
         @units.each { |u| io.write(u.old) }
         io.to_slice
       end
 
+      # What it will hold: superseding units in place of superseded ones.
       def replacement : Bytes
         io = IO::Memory.new
         @units.each { |u| io.write(u.new || u.old) }
         io.to_slice
       end
+
+      def assertion? : Bool
+        @units.all?(&.anchor?)
+      end
     end
 
-    # A file's edits: replace-alls before any section apply to the whole
-    # file (up to the first match).
+    # A file's records, in order.
     struct FileEdit
       getter path : String
-      getter leading_replaces : Array({Bytes, Bytes})
-      getter sections : Array(Section)
+      getter records : Array(Pattern)
 
-      def initialize(@path : String, @leading_replaces : Array({Bytes, Bytes}), @sections : Array(Section))
+      def initialize(@path : String, @records : Array(Pattern))
       end
     end
 
-    # Parse a diff document (with or without its SYN heading).
+    # Parse a diff document (with or without its SYN heading), refusing
+    # everything DIFF.md lists under "What a diff may not hold".
     def self.parse(buf : Bytes) : Array(FileEdit)
-      ptr = buf.to_unsafe
-      len = buf.size.to_i32
-      pos = Scan.layout(buf, 0, len)
-      if pos < len && ptr[pos] == SYN
-        heading, pos = Document.parse_heading(buf, pos + 1, len)
-        if (shape = heading.shape) && shape != "diff"
-          raise Error.new("heading declares shape '#{shape}', not diff")
-        end
+      parser = Parser.new(buf)
+      container = Container.new(buf, parser: parser)
+      raise Error.new("a diff is one document") unless container.documents.size == 1
+      doc = container.first
+      if (shape = doc.heading.shape) && shape != "diff"
+        raise Error.new("heading declares shape '#{shape}', not diff")
+      end
+      raise Error.new("a dead element in a diff: a hunk is kept without applying by writing it in a note") if parser.dead_elements > 0
+      parser.supersessions.each do |c|
+        raise Error.new("supersession at a grain other than the unit") unless c == US
       end
       files = Array(FileEdit).new
-      path = nil
-      leading = Array({Bytes, Bytes}).new
-      sections = Array(Section).new
-      flush = ->{
-        if p = path
-          files << FileEdit.new(p, leading, sections)
+      doc.body.files.each do |f|
+        if f.leading?
+          next if f.groups.empty?
+          raise Error.new("a record before the first FS")
         end
-        leading = Array({Bytes, Bytes}).new
-        sections = Array(Section).new
-      }
-      while pos < len
-        pos = Scan.layout(buf, pos, len)
-        break if pos >= len
-        b = ptr[pos]
-        dead = false
-        if b == BEL
-          p2 = Scan.layout(buf, pos + 1, len)
-          if p2 < len && (ptr[p2] == FS || ptr[p2] == GS || ptr[p2] == RS)
-            dead = true
-            pos = p2
-            b = ptr[pos]
-          else
-            pos = Scan.comment(buf, pos, len) # a note
-            next
-          end
+        path = String.new(f.name)
+        raise Error.new("empty path") if path.empty?
+        raise Error.new("the same path twice: #{path}") if files.any? { |e| e.path == path }
+        records = Array(Pattern).new
+        f.groups.each do |g|
+          raise Error.new("GS in a diff") if g.depth > 0
+          raise Error.new("a header row in a diff") if g.has_header?
+          g.records.each { |r| records << pattern_of(r) }
         end
-        case b
-        when FS
-          name, pos = read_name(buf, pos + 1, len)
-          unless dead
-            flush.call
-            raise Error.new("the same path twice: #{name}") if files.any? { |f| f.path == name }
-            path = name
-          end
-        when GS
-          raise Error.new("section before any file") unless path
-          units, pos = parse_pattern(buf, pos + 1, len)
-          sections << Section.new(units) unless dead
-        when RS
-          raise Error.new("replace-all before any file") unless path
-          old, pos = read_dvalue(buf, pos + 1, len)
-          raise Error.new("replace-all with an empty old part") if old.empty?
-          raise Error.new("replace-all without SUB") unless pos < len && ptr[pos] == SUB
-          new, pos = read_dvalue(buf, pos + 1, len)
-          unless dead
-            if sections.empty?
-              leading << {old, new}
-            else
-              sections[-1].replaces << {old, new}
-            end
-          end
-        when ETB
-          pos = Scan.plain(buf, Scan.layout(buf, pos + 1, len), len)
-        when EOT
-          pos = Scan.layout(buf, pos + 1, len)
-          raise SyntaxError.new("unexpected byte after EOT", pos) if pos < len && ptr[pos] != SYN && ptr[pos] != EM
-          break
+        files << FileEdit.new(path, records)
+      end
+      files
+    end
+
+    private def self.pattern_of(rec : Record) : Pattern
+      raise Error.new("a keyed unit in a diff record") if rec.keyed?
+      units = Array(Unit).new
+      pending = nil.as(Bytes?)
+      rec.units.each do |u|
+        raw = u.raw
+        raise Error.new("a nested level in a diff record") if C0.level?(raw)
+        raise Error.new("a reference in a diff record") if C0.reference?(raw)
+        v = C0.value(raw)
+        if u.superseded?
+          raise Error.new("a chained supersession: its search text would hold what the file never held") if pending
+          pending = v
+        elsif old = pending
+          raise Error.new("a substitution of nothing by nothing") if old.empty? && v.empty?
+          units << Unit.new(old, v)
+          pending = nil
         else
-          raise SyntaxError.new("unexpected byte in a diff body", pos)
+          units << Unit.new(v, nil)
         end
       end
-      flush.call
-      files
+      Pattern.new(units)
     end
 
     # Apply a diff to in-memory files. Validates everything first; raises
@@ -183,47 +164,29 @@ module C0
       end
     end
 
-    # Apply one file's edits (DIFF.md "Sections", "Replace-all").
+    # Apply one file's records (DIFF.md "Records"): each search text must
+    # match once from the cursor to the end of the file.
     def self.apply_file(data : Bytes, edit : FileEdit) : Bytes
       cursor = 0
       matches = Array({Int32, Int32, Bytes}).new
-      edit.sections.each do |sec|
-        search = sec.search
+      edit.records.each do |pat|
+        search = pat.search
         raise Error.new("empty search text in #{edit.path}") if search.empty?
         first = find(data, search, cursor)
         raise Error.new("pattern not found in #{edit.path}: #{String.new(search).inspect}") if first < 0
         raise Error.new("pattern matched more than once in #{edit.path}: #{String.new(search).inspect}") if find(data, search, first + 1) >= 0
-        matches << {first, first + search.size, sec.replacement}
+        matches << {first, first + search.size, pat.replacement}
         cursor = first + search.size
       end
-      # scopes: before the first match, and after each match to the next
       io = IO::Memory.new
-      first_start = matches.empty? ? data.size : matches[0][0]
-      io.write(replace_all(data[0...first_start], edit.leading_replaces, edit.path))
-      matches.each_with_index do |(s, e, repl), i|
+      pos = 0
+      matches.each do |(s, e, repl)|
+        io.write(data[pos...s])
         io.write(repl)
-        nxt = i + 1 < matches.size ? matches[i + 1][0] : data.size
-        io.write(replace_all(data[e...nxt], edit.sections[i].replaces, edit.path))
+        pos = e
       end
+      io.write(data[pos...data.size])
       io.to_slice
-    end
-
-    private def self.replace_all(segment : Bytes, replaces : Array({Bytes, Bytes}), path : String) : Bytes
-      replaces.each do |(old, new)|
-        count = 0
-        io = IO::Memory.new
-        pos = 0
-        while (i = find(segment, old, pos)) >= 0
-          io.write(segment[pos...i])
-          io.write(new)
-          pos = i + old.size
-          count += 1
-        end
-        raise Error.new("replace-all found nothing in #{path}: #{String.new(old).inspect}") if count == 0
-        io.write(segment[pos...segment.size])
-        segment = io.to_slice
-      end
-      segment
     end
 
     private def self.find(hay : Bytes, needle : Bytes, from : Int32) : Int32
@@ -237,52 +200,6 @@ module C0
         i += 1
       end
       -1
-    end
-
-    private def self.read_name(buf : Bytes, pos : Int32, len : Int32) : {String, Int32}
-      pos = Scan.layout(buf, pos, len)
-      raise SyntaxError.new("a path cannot be text", pos) if pos < len && buf[pos] == STX
-      stop = Scan.plain(buf, pos, len)
-      {String.new(C0.trim(buf[pos...stop])), stop}
-    end
-
-    private def self.read_dvalue(buf : Bytes, pos : Int32, len : Int32) : {Bytes, Int32}
-      ptr = buf.to_unsafe
-      pos = Scan.layout(buf, pos, len)
-      return {Bytes.empty, pos} if pos >= len
-      if ptr[pos] == STX
-        stop = Scan.text(buf, pos, len)
-        val = C0.decode_text(buf[(pos + 1)...(stop - 1)])
-        {val, Scan.layout(buf, stop, len)}
-      elsif ptr[pos] >= 0x20_u8
-        stop = Scan.plain(buf, pos, len)
-        {C0.trim(buf[pos...stop]), stop}
-      else
-        {Bytes.empty, pos}
-      end
-    end
-
-    private def self.parse_pattern(buf : Bytes, pos : Int32, len : Int32) : {Array(Unit), Int32}
-      ptr = buf.to_unsafe
-      units = Array(Unit).new
-      loop do
-        old, pos = read_dvalue(buf, pos, len)
-        if pos < len && ptr[pos] == SUB
-          new, pos = read_dvalue(buf, pos + 1, len)
-          units << Unit.new(old, new)
-        else
-          units << Unit.new(old, nil)
-        end
-        # notes after a unit
-        while pos < len && ptr[pos] == BEL
-          p2 = Scan.layout(buf, pos + 1, len)
-          break unless p2 < len && (ptr[p2] >= 0x20_u8 || ptr[p2] == STX)
-          pos = Scan.layout(buf, Scan.comment(buf, pos, len), len)
-        end
-        break unless pos < len && ptr[pos] == US
-        pos += 1
-      end
-      {units, pos}
     end
 
     def self.build(& : DiffBuilder ->) : Bytes
@@ -312,27 +229,37 @@ module C0
       yield
     end
 
-    def section(& : SectionBuilder ->) : Nil
-      @io.write_byte(GS)
-      yield SectionBuilder.new(@io)
+    # One anchored pattern.
+    def record(& : PatternBuilder ->) : Nil
+      @io.write_byte(RS)
+      yield PatternBuilder.new(@io)
     end
 
     # anchor, old → new, anchor in one call.
     def replace(context_before : String, old_text : String, new_text : String, context_after : String = "") : Nil
-      section do |s|
-        s.anchor(context_before) unless context_before.empty?
-        s.sub(old_text, new_text)
-        s.anchor(context_after) unless context_after.empty?
+      record do |r|
+        r.anchor(context_before) unless context_before.empty?
+        r.sub(old_text, new_text)
+        r.anchor(context_after) unless context_after.empty?
       end
     end
 
-    # RS old SUB new: every occurrence within the current section's scope.
-    def replace_all(old_text : String, new_text : String) : Nil
-      raise Diff::Error.new("replace-all needs a non-empty old part") if old_text.empty?
-      @io.write_byte(RS)
-      C0.write_value(@io, old_text)
-      @io.write_byte(SUB)
-      C0.write_value(@io, new_text)
+    # Insert `text` after `anchor`.
+    def insert_after(anchor : String, text : String) : Nil
+      record do |r|
+        r.anchor(anchor)
+        r.sub("", text)
+      end
+    end
+
+    # Remove `old_text`, found once after the cursor.
+    def delete(old_text : String, context_before : String = "", context_after : String = "") : Nil
+      replace(context_before, old_text, "", context_after)
+    end
+
+    # Assert that `text` is present once; nothing changes.
+    def assert(text : String) : Nil
+      record { |r| r.anchor(text) }
     end
 
     def note(text : String) : Nil
@@ -349,7 +276,7 @@ module C0
     end
   end
 
-  class SectionBuilder
+  class PatternBuilder
     @first : Bool
 
     def initialize(@io : IO::Memory)
@@ -361,10 +288,12 @@ module C0
       C0.write_value(@io, text)
     end
 
+    # `old␚␟new`.
     def sub(old_text : String, new_text : String) : Nil
       sep
       C0.write_value(@io, old_text)
       @io.write_byte(SUB)
+      @io.write_byte(US)
       C0.write_value(@io, new_text)
     end
 

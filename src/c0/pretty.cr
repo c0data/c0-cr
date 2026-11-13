@@ -39,6 +39,7 @@ module C0
       depth = 0        # nesting depth (levels)
       gdepth = 0       # group depth within the current level
       line_start = true
+      prefixed = false # a ␚ already opened this line
       stack = Array(Int32).new
 
       while pos < len
@@ -65,8 +66,11 @@ module C0
           line_start = true
           gdepth = 0
         when FS
-          io << '\n' unless line_start
-          write_indent(io, indent, depth)
+          unless prefixed
+            io << '\n' unless line_start
+            write_indent(io, indent, depth)
+          end
+          prefixed = false
           io << glyph(FS)
           pos = write_plain(buf, pos + 1, len, io)
           io << '\n'
@@ -78,13 +82,31 @@ module C0
             run += 1
             pos += 1
           end
-          io << '\n' unless line_start
-          write_indent(io, indent, depth)
+          unless prefixed
+            io << '\n' unless line_start
+            write_indent(io, indent, depth)
+          end
+          prefixed = false
           run.times { io << glyph(GS) }
           pos = write_plain(buf, pos, len, io)
           io << '\n'
           line_start = true
           gdepth = 1
+        when SUB
+          # the mark stands on the line of the element it qualifies
+          p2 = Scan.layout(buf, pos + 1, len)
+          if p2 < len && (ptr[p2] == GS || ptr[p2] == FS)
+            io << '\n' unless line_start
+            write_indent(io, indent, depth)
+            io << glyph(SUB)
+            prefixed = true
+            line_start = false
+            pos = p2
+          else
+            io << '\n' unless line_start
+            write_indent(io, indent, depth + gdepth)
+            pos, depth, line_start = write_element(buf, pos, len, io, indent, depth, gdepth, stack)
+          end
         when SOH, RS, BEL, ETB
           io << '\n' unless line_start
           write_indent(io, indent, depth + gdepth)
@@ -116,8 +138,8 @@ module C0
           io << " " << tail << " bytes" if tail > 0
           io << '\n'
           return
-        when STX, DLE, ENQ, US, SUB
-          # a unit-level code at element level (e.g. a diff pattern): write inline
+        when STX, DLE, ENQ, US
+          # a unit-level code at element level: write inline
           pos = write_units(buf, pos, len, io, indent, depth, gdepth, stack) { |d, gd, ls| depth = d; gdepth = gd; line_start = ls }
           io << '\n'
           line_start = true
@@ -144,6 +166,13 @@ module C0
           return {pos, depth, true}
         end
         # dead element: fall through to render it on this line
+        return {pos, depth, false} if pos >= len
+        return write_element(buf, pos, len, io, indent, depth, gdepth, stack)
+      when SUB
+        # supersession of a record, keyed unit, group or file: the mark
+        # stands with the element it qualifies
+        io << glyph(SUB)
+        pos = Scan.layout(buf, pos + 1, len)
         return {pos, depth, false} if pos >= len
         return write_element(buf, pos, len, io, indent, depth, gdepth, stack)
       when SOH
@@ -181,9 +210,21 @@ module C0
           write_data(C0.trim(buf[start...pos]), io)
         elsif C0.layout?(b)
           pos += 1
-        elsif b == US || b == ENQ || b == SUB
+        elsif b == US || b == ENQ
           io << glyph(b)
           pos += 1
+        elsif b == SUB
+          # before US or a keyed unit the supersession is inside this
+          # record, on this line; before anything else the mark belongs to
+          # the next element
+          p2 = Scan.layout(buf, pos + 1, len)
+          break unless p2 < len && (ptr[p2] == US || ptr[p2] == SOH)
+          if ptr[p2] == SOH
+            p3 = Scan.layout(buf, p2 + 1, len)
+            break if p3 < len && ptr[p3] == RS
+          end
+          io << glyph(SUB)
+          pos = p2
         elsif b == SOH
           p2 = Scan.layout(buf, pos + 1, len)
           break if p2 < len && ptr[p2] == RS
@@ -262,6 +303,14 @@ module C0
           else
             break
           end
+        elsif b == SUB
+          # a superseded heading key stays on the heading line
+          p2 = Scan.layout(buf, pos + 1, len)
+          break unless p2 < len && ptr[p2] == SOH
+          p3 = Scan.layout(buf, p2 + 1, len)
+          break if p3 < len && ptr[p3] == RS
+          io << glyph(SUB)
+          pos = p2
         elsif C0.layout?(b)
           pos += 1
         else

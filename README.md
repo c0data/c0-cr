@@ -53,7 +53,7 @@ readability.
 | 0x17 | ETB | ␗ | Commit marker (stream mode) |
 | 0x18 | CAN | ␘ | Close a nested level |
 | 0x19 | EM  | ␙ | End of medium: a raw blob follows |
-| 0x1A | SUB | ␚ | Substitution (C0-DIFF) |
+| 0x1A | SUB | ␚ | Supersede: the element before the next separator is replaced by the one after |
 | 0x1C | FS  | ␜ | File separator |
 | 0x1D | GS  | ␝ | Group / table / section separator |
 | 0x1E | RS  | ␞ | Record / row separator |
@@ -118,15 +118,13 @@ commit, so replay skips the torn tail.
 
 ### Diff
 
-Anchored patterns, with `␞old␚new` for replace-all within a section's
-scope. See `DIFF.md` in the spec.
+Records are anchored patterns; `old␚␟new` inside one is the substitution.
+See `DIFF.md` in the spec.
 
 ```
 ␖␁shape␟diff
-␜tally.rb
-␝def tally(items)
-␞count␚total
-␝end
+␜greeting.txt
+␞␂Hello ␃␟world␚␟universe␟!
 ␄
 ```
 
@@ -181,7 +179,8 @@ b.rs("Alice").us("1502.30")                               # ␞Alice␟1502.30
 b.rs.soh("host").us("localhost").soh("port").us("5432")   # ␞␁host␟localhost␁port␟5432
 b.gs("users").soh.rs("name").us("amount")                 # header row
 b.bel.gs("old")                                           # a dead group
-b.rs("old").sub("new")                                    # ␞old␚new  (C0-DIFF replace-all)
+b.rs("old").sub.us("new")                                 # ␞old␚␟new  (old superseded by new)
+b.rs.enq("tags").us.enq { b.gs("tags").rs("001") }        # ␞␅tags␟␅␐␝tags␞001␘
 ```
 
 The composed methods above are built on these and cannot write ill-formed
@@ -208,6 +207,13 @@ doc.warnings                      # missing SYN/EOT, unknown heading keys
 blob tail (`container.blob("name")`). `C0.validate(bytes)` checks
 well-formedness against the grammar; `C0.canonical?(bytes)` checks the
 canonical constraints.
+
+The model is the **result**: a dead element (`␇␞…`) is parsed and dropped
+with everything it holds, and a superseded one (`old␚␟new`, `␚␞`, `␚␝`,
+`␚␜`, `␚␁`) is dropped in favour of the one that supersedes it.
+`rec.units` lists a record's units as written, each with `superseded?`.
+A reference (`rec.ref(i)`) is a group `name` or a `pattern`, the level
+`␅␐␝tags␞001␟label␘` parsed as a body; `ref.path` linearises it.
 
 ### Pretty form
 
@@ -244,19 +250,25 @@ C0::JSON.to_yaml(buf) / C0::JSON.from_yaml(yaml)
 C0::CSV.from_csv(csv, "users") / C0::CSV.to_csv(buf)
 ```
 
-### C0-DIFF
+### C0DIFF
 
 ```crystal
 diff = C0::Diff.build do |d|
-  d.file("tally.rb") do
-    d.section { |s| s.anchor("def tally(items)") }
-    d.replace_all("count", "total")
-    d.section { |s| s.anchor("end") }
+  d.file("greeting.txt") do
+    d.record { |r| r.anchor("Hello "); r.sub("world", "universe"); r.anchor("!") }
+    d.insert_after("universe!", "\n")
+    d.assert("Hello")                               # must be present once; nothing changes
   end
 end
-C0::Diff.apply(diff, {"tally.rb" => source})   # validates everything first
+C0::Diff.apply(diff, {"greeting.txt" => source})   # validates everything first
 C0::Diff.apply_files(diff, "src")
 ```
+
+Each record's search text must match once from the previous match to the
+end of the file. There is no replace-all mark: a tool expands one into
+anchored records against the target (DIFF.md). Anything the text diff does
+not use (keyed units, levels, references, header rows, GS, dead records,
+supersession at another grain) is refused.
 
 ### Stream logs
 
@@ -270,11 +282,14 @@ end
 
 r = C0::Stream::Reader.read("events.c0")
 r.torn?            # uncommitted tail?
-r.damaged          # blocks cut by a commit inside open text or a level
+r.damaged          # indexes of committed blocks that are not well-formed
 r.each_record { |rec| ... }
 ```
 
-`Writer.open` repairs a torn tail before appending.
+`Writer.open` repairs a torn tail before appending. A damaged block
+delivers nothing; by default the reader yields the records before it and
+raises `C0::Stream::DamagedBlockError` with the offset to resume at, and
+with `Reader.new(buf, continue_past_damage: true)` it reads on past it.
 
 ## Conformance
 

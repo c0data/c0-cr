@@ -13,7 +13,7 @@ module C0
   ETB = 0x17_u8 # Commit marker (stream mode)
   CAN = 0x18_u8 # Close a nested level
   EM  = 0x19_u8 # End of medium: raw blob follows
-  SUB = 0x1a_u8 # Substitution (C0-DIFF)
+  SUB = 0x1a_u8 # Supersede: the element before the next separator or opener is replaced by the one after
   FS  = 0x1c_u8 # File separator
   GS  = 0x1d_u8 # Group separator
   RS  = 0x1e_u8 # Record separator
@@ -257,6 +257,16 @@ module C0
           pos = level(buf, pos, stop)
         elsif byte == ENQ
           pos += 1
+        elsif byte == SUB
+          # supersession of a unit or keyed unit stays inside the record; of
+          # a record, group or file, it ends this record first
+          p2 = layout(buf, pos + 1, stop)
+          return pos unless p2 < stop && (ptr[p2] == US || ptr[p2] == SOH)
+          if ptr[p2] == SOH
+            p3 = layout(buf, p2 + 1, stop)
+            return pos if p3 < stop && ptr[p3] == RS
+          end
+          pos = p2
         elsif byte == BEL
           # a note inside the record, or a dead element; a dead record-level
           # element (BEL RS / BEL GS …) ends this record first.
@@ -451,6 +461,7 @@ end
 
 require "./c0/token"
 require "./c0/tokenizer"
+require "./c0/parser"
 require "./c0/validator"
 require "./c0/body"
 require "./c0/document"
