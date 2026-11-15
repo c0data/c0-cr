@@ -100,7 +100,7 @@ line two␃
 ␖␜My Document
 ␝Chapter 1
 ␞First paragraph.
-␝␝Section 1.1
+␚␝Section 1.1
 ␞Nested content.
 ␄
 ```
