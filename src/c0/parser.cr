@@ -452,6 +452,7 @@ module C0
             break if p3 < stop && ptr[p3] == RS
             not_canonical("dead element")
             _key, _vs, pos = keyed_unit(p2 + 1, stop, heading: false)
+            pos = sub_units(pos, stop) # a dead keyed unit takes its sub-units
           elsif c >= 0x20_u8 || c == STX
             pos = trailing_notes(pos, stop)
           elsif c == SUB

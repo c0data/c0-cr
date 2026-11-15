@@ -145,6 +145,7 @@ describe "Subordinates (SUB)" do
     rec.values.should eq(["a".to_slice, "d".to_slice])
     rec.unit(0).subs[0].subs.map { |u| String.new(u.value) }.should eq(["c"])
     C0::Body.new(C0::Pretty.parse("␞␁k␟v␚␟w")).record(0).unit("k").not_nil!.subs.size.should eq(1)
+    C0::Body.new(C0::Pretty.parse("␞␇␁k␟v␚␟w␁z␟1")).record(0).keys.should eq(["z".to_slice])
     C0.canonical?(C0::Pretty.parse("␞a␚␟b")).should be_true
     C0.canonical?(C0::Pretty.parse("␝␝b␞x")).should be_true
     expect_raises(C0::SyntaxError) { C0.validate(C0::Pretty.parse("␝g␚␞x")) }

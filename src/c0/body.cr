@@ -442,7 +442,8 @@ module C0
           pos = sub_spans(ve, spans)
           yield C0.trim(@buf[ks...ke]), ks, ke, vs, ve, spans
         elsif b == BEL
-          pos = Scan.comment(@buf, pos, @end)
+          # a note, or a dead keyed unit, which takes its sub-units
+          pos = sub_spans(Scan.comment(@buf, pos, @end), Array({Int32, Int32, Int32}).new)
         elsif C0.layout?(b)
           pos += 1
         else
