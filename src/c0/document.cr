@@ -31,10 +31,17 @@ module C0
       self["version"].try { |v| String.new(v).to_i? } || 1
     end
 
-    # The schema the body claims: a name, or the keyed record of name, url
-    # and hash as a Record; nil when absent.
-    def schema : Bytes?
-      self["schema"]
+    # The schema the body claims: the name as bytes, or, when written as a
+    # level, its one keyed record of name, url and hash as a Record; nil
+    # when absent. The same shape in every port.
+    def schema : Bytes | Record | Nil
+      raw = raw_pair("schema")
+      return nil unless raw
+      if raw.size > 0 && raw[0] == DLE
+        Body.new(raw, 1, Scan.level(raw, 0) - 1, level: true).records.first?
+      else
+        self["schema"]
+      end
     end
 
     # The blob table as a Body, when declared as a level (anything else
@@ -45,8 +52,13 @@ module C0
 
     # Raw unit of the blob key (a level), or nil.
     def raw_blob : Bytes?
+      raw_pair("blob")
+    end
+
+    # The unit under a key as written (a level keeps its DLE … CAN), or nil.
+    private def raw_pair(key : String) : Bytes?
       found = nil
-      @pairs_raw.try &.each { |k, v| found = v if k == "blob".to_slice }
+      @pairs_raw.try &.each { |k, v| found = v if k == key.to_slice }
       found
     end
 

@@ -32,6 +32,7 @@ module C0
       getter committed_end : Int32
       getter blocks : Array({Int32, Int32})   # [start, end) of each committed block (ETB excluded)
       getter damaged : Array(Int32)           # indexes of damaged blocks
+      getter torn_regions : Array({Int32, Int32}) # [start, end) of uncommitted bytes torn by a SYN inside the stream
       getter? torn : Bool
       getter? continue_past_damage : Bool
 
@@ -39,6 +40,7 @@ module C0
         @committed_end = 0
         @blocks = Array({Int32, Int32}).new
         @damaged = Array(Int32).new
+        @torn_regions = Array({Int32, Int32}).new
         @torn = false
         @container = nil
         scan
@@ -143,6 +145,7 @@ module C0
       # block skipped, so what follows is read in the context before it.
       private def parse_committed : Nil
         skip = Hash(Int32, Int32).new
+        @torn_regions.each { |(s, e)| skip[s] = e }
         loop do
           parser = Parser.new(@buf, skip: skip)
           begin
@@ -194,6 +197,7 @@ module C0
               in_text = false
               depth = 0
               if b == SYN
+                tear(block_start, pos)
                 block_start = pos
               end
             end
@@ -213,6 +217,7 @@ module C0
               next
             elsif b == SYN && pos > 0
               # tears the uncommitted bytes before it; a new document begins
+              tear(block_start, pos)
               block_start = pos
               depth = 0
             end
@@ -224,6 +229,13 @@ module C0
 
       private def commit(start : Int32, stop : Int32) : Nil
         @blocks << {start, stop}
+      end
+
+      # Uncommitted bytes before a SYN inside the stream are torn: no block,
+      # and they deliver nothing (DESIGN.md, Stream Mode). Layout alone is
+      # not a tear.
+      private def tear(start : Int32, stop : Int32) : Nil
+        @torn_regions << {start, stop} if Scan.layout(@buf, start, stop) < stop
       end
 
       # After an ETB: skip its payload and return committed_end (which

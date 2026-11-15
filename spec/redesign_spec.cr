@@ -330,3 +330,34 @@ describe "documents" do
     d.warnings.should eq(["no SYN at the start of the document", "no EOT at the end of the document"])
   end
 end
+
+describe "Heading#schema (1.0 shape, shared by every port)" do
+  it "returns the name as bytes" do
+    doc = C0::Document.new(C0::Pretty.parse("␖␁schema␟ledger␞x␄"))
+    doc.heading.schema.should eq("ledger".to_slice)
+  end
+
+  it "returns the one keyed record for the level form" do
+    doc = C0::Document.new(C0::Pretty.parse("␖␁schema␟␐␞␁name␟ledger␁hash␟sha256:00␘␞x␄"))
+    rec = doc.heading.schema.as(C0::Record)
+    rec["name"].should eq("ledger".to_slice)
+    rec["hash"].should eq("sha256:00".to_slice)
+  end
+
+  it "is nil when absent" do
+    C0::Document.new(C0::Pretty.parse("␖␞x␄")).heading.schema.should be_nil
+  end
+end
+
+describe "Stream::Reader#torn_regions" do
+  it "reports the uncommitted bytes a mid-stream SYN tore" do
+    r = C0::Stream::Reader.new(C0::Pretty.parse("␞a␖␁shape␟stream␗␞b␗"))
+    r.torn_regions.should eq([{0, 2}])
+    r.records.map { |rec| String.new(rec.value(0)) }.should eq(["b"])
+  end
+
+  it "does not report layout alone before a SYN" do
+    r = C0::Stream::Reader.new(C0::Pretty.parse("␞a␗\n␖␁shape␟stream␗"))
+    r.torn_regions.should be_empty
+  end
+end
