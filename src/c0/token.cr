@@ -13,7 +13,7 @@ module C0
     ETB # commit marker
     CAN # close a nested level
     EM  # end of medium
-    SUB # substitution
+    SUB # subordinate (depth prefix, sub-unit)
     FS  # file separator
     GS  # group separator
     RS  # record separator

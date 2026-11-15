@@ -93,12 +93,15 @@ module C0
           line_start = true
           gdepth = 1
         when SUB
-          # the mark stands on the line of the element it qualifies
+          # a depth prefix stands on the line of the group it qualifies
           p2 = Scan.layout(buf, pos + 1, len)
+          while p2 < len && ptr[p2] == SUB
+            p2 = Scan.layout(buf, p2 + 1, len)
+          end
           if p2 < len && (ptr[p2] == GS || ptr[p2] == FS)
             io << '\n' unless line_start
             write_indent(io, indent, depth)
-            io << glyph(SUB)
+            buf[pos...p2].count(SUB).times { io << glyph(SUB) }
             prefixed = true
             line_start = false
             pos = p2
@@ -169,8 +172,7 @@ module C0
         return {pos, depth, false} if pos >= len
         return write_element(buf, pos, len, io, indent, depth, gdepth, stack)
       when SUB
-        # supersession of a record, keyed unit, group or file: the mark
-        # stands with the element it qualifies
+        # a SUB before a line code stands with the element it prefixes
         io << glyph(SUB)
         pos = Scan.layout(buf, pos + 1, len)
         return {pos, depth, false} if pos >= len
@@ -214,16 +216,14 @@ module C0
           io << glyph(b)
           pos += 1
         elsif b == SUB
-          # before US or a keyed unit the supersession is inside this
-          # record, on this line; before anything else the mark belongs to
-          # the next element
+          # a sub-unit (a SUB run then US) is inside this record, on this
+          # line; a SUB run before a line code prefixes the next element
           p2 = Scan.layout(buf, pos + 1, len)
-          break unless p2 < len && (ptr[p2] == US || ptr[p2] == SOH)
-          if ptr[p2] == SOH
-            p3 = Scan.layout(buf, p2 + 1, len)
-            break if p3 < len && ptr[p3] == RS
+          while p2 < len && ptr[p2] == SUB
+            p2 = Scan.layout(buf, p2 + 1, len)
           end
-          io << glyph(SUB)
+          break unless p2 < len && ptr[p2] == US
+          buf[pos...p2].count(SUB).times { io << glyph(SUB) }
           pos = p2
         elsif b == SOH
           p2 = Scan.layout(buf, pos + 1, len)
@@ -303,14 +303,6 @@ module C0
           else
             break
           end
-        elsif b == SUB
-          # a superseded heading key stays on the heading line
-          p2 = Scan.layout(buf, pos + 1, len)
-          break unless p2 < len && ptr[p2] == SOH
-          p3 = Scan.layout(buf, p2 + 1, len)
-          break if p3 < len && ptr[p3] == RS
-          io << glyph(SUB)
-          pos = p2
         elsif C0.layout?(b)
           pos += 1
         else

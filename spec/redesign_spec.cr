@@ -134,16 +134,23 @@ describe "Reference" do
   end
 end
 
-describe "Supersession" do
-  it "drops the superseded element from the model and keeps it in the bytes" do
-    doc = C0::Document.new(C0::Pretty.parse("␝g␞a␟b␚␟c␚␞x␟y"))
-    doc.group("g").records.size.should eq(1)
-    doc.group("g").record(0).values.should eq(["x".to_slice, "y".to_slice])
-    rec = C0::Body.new(C0::Pretty.parse("␞a␚␟b␟c")).record(0)
-    rec.values.should eq(["b".to_slice, "c".to_slice])
-    rec.units.map { |u| {String.new(u.value), u.superseded?} }.should eq([{"a", true}, {"b", false}, {"c", false}])
+describe "Subordinates (SUB)" do
+  it "reads SUB GS as a subsection and SUB US as a sub-unit" do
+    doc = C0::Document.new(C0::Pretty.parse("␝g␞a␟b␚␟c␚␝s␞x"))
+    doc.groups.map { |g| {String.new(g.name), g.depth} }.should eq([{"g", 1}, {"s", 2}])
+    rec = doc.group("g").record(0)
+    rec.values.should eq(["a".to_slice, "b".to_slice])
+    rec.unit(1).subs.map { |u| String.new(u.value) }.should eq(["c"])
+    rec = C0::Body.new(C0::Pretty.parse("␞a␚␟b␚␚␟c␟d")).record(0)
+    rec.values.should eq(["a".to_slice, "d".to_slice])
+    rec.unit(0).subs[0].subs.map { |u| String.new(u.value) }.should eq(["c"])
+    C0::Body.new(C0::Pretty.parse("␞␁k␟v␚␟w")).record(0).unit("k").not_nil!.subs.size.should eq(1)
     C0.canonical?(C0::Pretty.parse("␞a␚␟b")).should be_true
+    C0.canonical?(C0::Pretty.parse("␝␝b␞x")).should be_true
     expect_raises(C0::SyntaxError) { C0.validate(C0::Pretty.parse("␝g␚␞x")) }
+    expect_raises(C0::SyntaxError) { C0.validate(C0::Pretty.parse("␝a␚␚␝c")) }
+    expect_raises(C0::SyntaxError) { C0.validate(C0::Pretty.parse("␞a␚␚␟c")) }
+    C0::Builder.build { |b| b.gs("a").gs("s", depth: 2).rs("x").sub_unit("y") }.should eq(C0::Pretty.parse("␝a␚␝s␞x␚␟y"))
   end
 
   it "reports a body whose every element is dead as an empty body" do

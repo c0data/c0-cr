@@ -1,11 +1,10 @@
 module C0
   # The one parser of the base grammar (GRAMMAR.md). It walks a buffer,
   # raises on the first structural error, builds the document model with
-  # supersession applied (the superseded element dropped), notes every
-  # canonical violation when asked, and counts what tools above the format
-  # need to know: dead elements met in bodies and the grain of every
-  # supersession. `Body`, `Document`, `Container`, `Validator` and the
-  # stream reader are all built on it.
+  # dead elements dropped, notes every canonical violation when asked, and
+  # counts the dead elements met in bodies for tools above the format.
+  # `Body`, `Document`, `Container`, `Validator` and the stream reader are
+  # all built on it.
   #
   # Body level is a flat state machine over lines (file line, group line,
   # header row, record, note, commit); records and their values are
@@ -13,7 +12,6 @@ module C0
   class Parser
     getter warnings : Array(String)     # canonical violations, when checking canonicality
     getter dead_elements : Int32        # dead elements met in bodies (the heading's dead keys are not counted)
-    getter supersessions : Array(UInt8) # the code after each SUB met: US, SOH, RS, GS or FS
 
     @buf : Bytes
     @len : Int32
@@ -30,7 +28,6 @@ module C0
       @ok = true
       @warnings = Array(String).new
       @dead_elements = 0
-      @supersessions = Array(UInt8).new
     end
 
     # Whether nothing non-canonical has been met.
@@ -64,8 +61,8 @@ module C0
 
     # ---- heading --------------------------------------------------------
 
-    # After SYN. Returns the heading (superseded keys dropped, duplicates
-    # kept) and the position of the first body code.
+    # After SYN. Returns the heading (dead keys dropped, duplicates kept)
+    # and the position of the first body code.
     def heading(pos : Int32, stop : Int32) : {Heading, Int32}
       ptr = @buf.to_unsafe
       hs = pos
@@ -106,18 +103,8 @@ module C0
           p2 = Scan.layout(@buf, pos + 1, stop)
           raise SyntaxError.new("SUB at the end of input", pos) if p2 >= stop
           c = ptr[p2]
-          if c == SOH
-            p3 = Scan.layout(@buf, p2 + 1, stop)
-            break if p3 < stop && ptr[p3] == RS # the body's business: an error there
-            raise SyntaxError.new("nothing to supersede: no keyed unit before", pos) if pairs.empty?
-            @supersessions << SOH
-            pairs.pop
-            raw_pairs.pop
-            key, vs, pos = keyed_unit(p2 + 1, stop, heading: true)
-            add.call(key, C0.trim(@buf[vs...pos]), vs)
-          else
-            break # SUB before a body code: the body's business
-          end
+          raise SyntaxError.new("the heading's values take no sub-units", pos) if c == US
+          break # SUB before a body code: the body's business
         elsif b >= 0x20_u8
           raise SyntaxError.new("plain text directly after SYN", pos)
         else
@@ -158,8 +145,8 @@ module C0
 
     # A body from pos to stop. At depth zero (level false) commits are legal
     # and the body ends at EOT, SYN, EM or stop; in a level it ends at CAN.
-    # Returns the files (dead and superseded elements dropped) and the
-    # position of the code that ended the body.
+    # Returns the files (dead elements dropped) and the position of the
+    # code that ended the body.
     def body(pos : Int32, stop : Int32, level : Bool) : {Array(FileView), Int32}
       ptr = @buf.to_unsafe
       files = Array(FileView).new
@@ -170,8 +157,9 @@ module C0
       dead_file = false  # inside a dead file: everything to the next file line is discarded
       dead_depth = nil.as(Int32?) # inside a dead group of this depth
       dead = false       # BEL seen: the next element is dead
-      sup = false        # SUB seen: the next element supersedes the one before it
-      mark_at = pos      # position of that BEL or SUB, for errors
+      prefix = 0         # SUB run read before a GS: the subsection's depth less one
+      prev_depth = 0     # depth of the group line before, as written (dead or not)
+      mark_at = pos      # position of that BEL, for errors
 
       # Add the unnamed group to its file once it has content.
       attach = ->{
@@ -196,19 +184,14 @@ module C0
           if dead
             @dead_elements += 1
           else
-            if sup
-              raise SyntaxError.new("nothing to supersede: no record before it in the group", mark_at) if group.records.empty?
-              group.records.pop
-            end
             group.records << rec
             attach.call
             header_ok = false
           end
-          dead = sup = false
+          dead = false
         when SOH
           p2 = Scan.layout(@buf, pos + 1, stop)
           raise SyntaxError.new("keyed unit outside a record", pos) unless p2 < stop && ptr[p2] == RS
-          raise SyntaxError.new("a header row admits no supersession", mark_at) if sup
           raise SyntaxError.new("header row not at the start of its group", pos) unless header_ok
           hdr, pos = header_row(p2 + 1, stop)
           if dead
@@ -220,12 +203,13 @@ module C0
           end
           dead = false
         when GS
-          depth = 0
-          while pos < stop && ptr[pos] == GS
-            depth += 1
-            pos = layout(pos + 1, stop)
+          depth = 1 + prefix
+          prefix = 0
+          if depth > prev_depth + 1
+            raise SyntaxError.new("depth skipped: a group is at most one deeper than the group line before it", pos)
           end
-          ns, ne, pos = name(pos, stop)
+          prev_depth = depth
+          ns, ne, pos = name(layout(pos + 1, stop), stop)
           if (dd = dead_depth) && depth <= dd
             dead_depth = nil # the dead group's span ends here
           end
@@ -238,13 +222,12 @@ module C0
             group = Group.new(@buf, depth, ns, ne, nil, Array(Record).new)
             attached = true
           else
-            supersede_group(file.groups, depth, mark_at) if sup
             group = Group.new(@buf, depth, ns, ne, nil, Array(Record).new)
             file.groups << group
             attached = true
           end
           header_ok = true
-          dead = sup = false
+          dead = false
         when FS
           ns, ne, pos = name(pos + 1, stop)
           finish_file.call
@@ -253,19 +236,15 @@ module C0
             dead_file = true
           else
             dead_file = false
-            if sup
-              raise SyntaxError.new("nothing to supersede: no file before it", mark_at) if files.empty?
-              files.pop
-            end
           end
           file = FileView.new(@buf, ns, ne, Array(Group).new, leading: false)
           group = Group.new(@buf, 0, 0, 0, nil, Array(Record).new)
           attached = false
           dead_depth = nil
+          prev_depth = 0
           header_ok = true
-          dead = sup = false
+          dead = false
         when BEL
-          raise SyntaxError.new("SUB before BEL", mark_at) if sup
           raise SyntaxError.new("BEL before a code that is not an element", pos) if dead
           p2 = Scan.layout(@buf, pos + 1, stop)
           raise UnexpectedEndError.new("BEL at end of input", p2) if p2 >= stop
@@ -278,48 +257,66 @@ module C0
             dead = true
             mark_at = pos
             pos = p2
+          elsif c == SUB
+            # BEL kills a group line whole, its SUB prefix included
+            p3 = p2
+            while p3 < stop && ptr[p3] == SUB
+              p3 = Scan.layout(@buf, p3 + 1, stop)
+            end
+            if p3 < stop && ptr[p3] == GS
+              not_canonical("dead element")
+              dead = true
+              mark_at = pos
+              pos = p2
+            elsif p3 < stop && ptr[p3] == US
+              raise SyntaxError.new("BEL before a sub-unit: a unit cannot be dead", pos)
+            else
+              raise SyntaxError.new("BEL before a code that is not an element", p2)
+            end
           elsif c == DLE
             raise SyntaxError.new("a nested level is not an item", p2)
           else
             raise SyntaxError.new("BEL before a code that is not an element", p2)
           end
         when SUB
-          raise SyntaxError.new("BEL before SUB: SUB is not an element", mark_at) if dead
-          raise SyntaxError.new("SUB before SUB", pos) if sup
-          p2 = Scan.layout(@buf, pos + 1, stop)
-          raise SyntaxError.new("SUB at the end of input", pos) if p2 >= stop
-          c = ptr[p2]
-          if c == RS || c == GS || c == FS
-            @supersessions << c
-            sup = true
-            mark_at = pos
-            pos = p2
+          # A run of SUB before GS is the subsection's depth prefix; before
+          # RS, FS or SOH it is reserved; a sub-unit (SUB US) lives inside
+          # a record and never reaches here.
+          start = pos
+          run = 0
+          while pos < stop && ptr[pos] == SUB
+            run += 1
+            pos = layout(pos + 1, stop)
+          end
+          raise SyntaxError.new("SUB at the end of input", start) if pos >= stop
+          c = ptr[pos]
+          if c == GS
+            prefix = run
+          elsif c == RS
+            raise SyntaxError.new("SUB before RS is reserved (a sub-record)", start)
+          elsif c == FS
+            raise SyntaxError.new("SUB before FS is reserved (a sub-file)", start)
           elsif c == SOH
-            p3 = Scan.layout(@buf, p2 + 1, stop)
-            raise SyntaxError.new("a header row admits no supersession", pos) if p3 < stop && ptr[p3] == RS
-            raise SyntaxError.new("keyed unit outside a record", p2)
+            raise SyntaxError.new("SUB before SOH is reserved (a sub-key); a header row admits none", start)
           elsif c == US
-            raise SyntaxError.new("US outside a record", p2)
+            raise SyntaxError.new("US outside a record", pos)
           elsif c == BEL
-            raise SyntaxError.new("SUB before BEL", pos)
+            raise SyntaxError.new("SUB before BEL", start)
           else
-            raise SyntaxError.new("SUB before a byte that is not a separator or opener", pos)
+            raise SyntaxError.new("SUB before a byte that is not a separator", start)
           end
         when ETB
           raise SyntaxError.new("commit inside a nested level", pos) if level
           raise SyntaxError.new("BEL before ETB: framing cannot be commented out", mark_at) if dead
-          raise SyntaxError.new("SUB before ETB", mark_at) if sup
           not_canonical("commit")
           pos = Scan.plain(@buf, layout(pos + 1, stop), stop)
         when EOT, SYN, EM
           raise SyntaxError.new("framing inside open level", pos) if level
           raise SyntaxError.new("BEL before framing", mark_at) if dead
-          raise SyntaxError.new("SUB before framing", mark_at) if sup
           break
         when CAN
           raise SyntaxError.new("CAN with no open level", pos) unless level
           raise SyntaxError.new("BEL before CAN", mark_at) if dead
-          raise SyntaxError.new("SUB before CAN", mark_at) if sup
           break
         when US
           raise SyntaxError.new("US outside a record", pos)
@@ -341,18 +338,6 @@ module C0
       # leading file, so `files` is never empty.
       files << FileView.new(@buf, 0, 0, Array(Group).new, leading: true) if files.empty?
       {files, pos}
-    end
-
-    # Remove the last group at `depth` and the deeper groups that follow it
-    # (its span), so the superseding group can take its place.
-    private def supersede_group(groups : Array(Group), depth : Int32, at : Int32) : Nil
-      i = groups.rindex { |g| g.depth == depth }
-      raise SyntaxError.new("nothing to supersede: no earlier group at that depth", at) unless i
-      j = i + 1
-      while j < groups.size && groups[j].depth > depth
-        j += 1
-      end
-      groups.delete_at(i...j)
     end
 
     # A label or path: plain, never text. Returns {name start, name end, pos}.
@@ -382,7 +367,7 @@ module C0
       end
       if pos < stop && ptr[pos] == SUB
         p2 = Scan.layout(@buf, pos + 1, stop)
-        raise SyntaxError.new("a header row admits no supersession", pos) if p2 < stop && ptr[p2] == US
+        raise SyntaxError.new("a header row admits no sub-units", pos) if p2 < stop && ptr[p2] == US
       end
       {Record.new(@buf, start, trim_end(start, pos)), pos}
     end
@@ -396,8 +381,7 @@ module C0
       {Record.new(@buf, start, trim_end(start, pos)), pos}
     end
 
-    # Does the record starting here begin with a keyed unit, live, dead or
-    # superseding?
+    # Does the record starting here begin with a keyed unit, live or dead?
     private def keyed_start?(pos : Int32, stop : Int32) : Bool
       ptr = @buf.to_unsafe
       loop do
@@ -407,7 +391,7 @@ module C0
         if b == SOH
           p2 = Scan.layout(@buf, pos + 1, stop)
           return !(p2 < stop && ptr[p2] == RS)
-        elsif b == BEL || b == SUB
+        elsif b == BEL
           p2 = Scan.layout(@buf, pos + 1, stop)
           return false if p2 >= stop
           c = ptr[p2]
@@ -415,7 +399,7 @@ module C0
             p3 = Scan.layout(@buf, p2 + 1, stop)
             return !(p3 < stop && ptr[p3] == RS)
           end
-          return false unless b == BEL && (c >= 0x20_u8 || c == STX)
+          return false unless c >= 0x20_u8 || c == STX
           pos = note_content(p2, stop) # a note: look past it
         else
           return false
@@ -427,29 +411,14 @@ module C0
       ptr = @buf.to_unsafe
       loop do
         pos = value(pos, stop, heading: false)
+        pos = sub_units(pos, stop)
         pos = layout(pos, stop)
         break if pos >= stop
         b = ptr[pos]
         if b == US
           pos += 1
         elsif b == SUB
-          p2 = Scan.layout(@buf, pos + 1, stop)
-          raise SyntaxError.new("SUB at the end of input", pos) if p2 >= stop
-          c = ptr[p2]
-          if c == US
-            @supersessions << US
-            pos = p2 + 1
-          elsif c == RS || c == GS || c == FS
-            break # qualifies the next line: the body's business
-          elsif c == SOH
-            p3 = Scan.layout(@buf, p2 + 1, stop)
-            raise SyntaxError.new("a header row admits no supersession", pos) if p3 < stop && ptr[p3] == RS
-            raise SyntaxError.new("keyed unit in a positional record (mixed record)", p2)
-          elsif c == BEL
-            raise SyntaxError.new("SUB before BEL", pos)
-          else
-            raise SyntaxError.new("SUB before a byte that is not a separator or opener", pos)
-          end
+          break # a prefix before the next line: the body's business
         elsif b == SOH
           p2 = Scan.layout(@buf, pos + 1, stop)
           break if p2 < stop && ptr[p2] == RS # a header row ends the record
@@ -472,6 +441,7 @@ module C0
           p2 = Scan.layout(@buf, pos + 1, stop)
           break if p2 < stop && ptr[p2] == RS
           key, _vs, pos = keyed_unit(pos + 1, stop, heading: false)
+          pos = sub_units(pos, stop)
           keys << key
         elsif b == BEL
           p2 = Scan.layout(@buf, pos + 1, stop)
@@ -485,31 +455,12 @@ module C0
           elsif c >= 0x20_u8 || c == STX
             pos = trailing_notes(pos, stop)
           elsif c == SUB
-            raise SyntaxError.new("BEL before SUB: SUB is not an element", p2)
+            raise SyntaxError.new("BEL before a sub-unit: a unit cannot be dead", p2)
           else
             break
           end
         elsif b == SUB
-          p2 = Scan.layout(@buf, pos + 1, stop)
-          raise SyntaxError.new("SUB at the end of input", pos) if p2 >= stop
-          c = ptr[p2]
-          if c == SOH
-            p3 = Scan.layout(@buf, p2 + 1, stop)
-            raise SyntaxError.new("a header row admits no supersession", pos) if p3 < stop && ptr[p3] == RS
-            raise SyntaxError.new("nothing to supersede: no keyed unit before it", pos) if keys.empty?
-            @supersessions << SOH
-            keys.pop
-            key, _vs, pos = keyed_unit(p2 + 1, stop, heading: false)
-            keys << key
-          elsif c == US
-            raise SyntaxError.new("US after a keyed value (mixed record)", p2)
-          elsif c == RS || c == GS || c == FS
-            break
-          elsif c == BEL
-            raise SyntaxError.new("SUB before BEL", pos)
-          else
-            raise SyntaxError.new("SUB before a byte that is not a separator or opener", pos)
-          end
+          break # a prefix before the next line: the body's business
         else
           break
         end
@@ -528,6 +479,42 @@ module C0
       vs = pos + 1
       pos = value(vs, stop, heading: heading)
       {@buf[ks...ke], vs, pos}
+    end
+
+    # The sub-units after a unit's value: runs of SUB then US then a value,
+    # each run's length the sub-unit's depth, at most one deeper than the
+    # sub-unit before it. Returns the position after the last; a SUB that
+    # prefixes a line code is left for the body, a reserved grain raised.
+    private def sub_units(pos : Int32, stop : Int32) : Int32
+      ptr = @buf.to_unsafe
+      prev = 0
+      loop do
+        p = layout(pos, stop)
+        return pos unless p < stop && ptr[p] == SUB
+        start = p
+        run = 0
+        while p < stop && ptr[p] == SUB
+          run += 1
+          p = layout(p + 1, stop)
+        end
+        raise SyntaxError.new("SUB at the end of input", start) if p >= stop
+        c = ptr[p]
+        if c == US
+          raise SyntaxError.new("depth skipped: a sub-unit is at most one deeper than the sub-unit before it", start) if run > prev + 1
+          prev = run
+          pos = value(p + 1, stop, heading: false)
+        elsif c == RS || c == GS || c == FS
+          return pos # the body's business
+        elsif c == SOH
+          p2 = Scan.layout(@buf, p + 1, stop)
+          raise SyntaxError.new("a header row admits no SUB", start) if p2 < stop && ptr[p2] == RS
+          raise SyntaxError.new("SUB before SOH is reserved (a sub-key)", start)
+        elsif c == BEL
+          raise SyntaxError.new("SUB before BEL", start)
+        else
+          raise SyntaxError.new("SUB before a byte that is not a separator", start)
+        end
+      end
     end
 
     # ---- values ---------------------------------------------------------
@@ -631,10 +618,8 @@ module C0
       b = ptr[pos]
       if b == DLE
         dead0 = @dead_elements
-        sup0 = @supersessions.size
         files, after = level(pos, stop)
         raise SyntaxError.new("a dead element is not a step of a pattern", pos) if @dead_elements != dead0
-        raise SyntaxError.new("supersession is not a step of a pattern", pos) if @supersessions.size != sup0
         body = Body.new(@buf, pos + 1, after - 1, files)
         check_pattern(body, pos, inner: false)
         {Reference.new(nil, body), after}

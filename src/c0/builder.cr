@@ -65,9 +65,11 @@ module C0
       self
     end
 
-    # GS and, when given, a group name. `gs.gs("sub")` is a group at depth 2.
-    def gs(name : String? = nil) : self
+    # GS and, when given, a group name; `depth` SUB prefixes it less one:
+    # `gs("s", depth: 2)` is `␚␝s`, a subsection.
+    def gs(name : String? = nil, depth : Int32 = 1) : self
       end_record
+      (depth - 1).times { @io.write_byte(SUB) }
       @io.write_byte(GS)
       C0.write_name(@io, name.to_slice) if name
       self
@@ -90,8 +92,9 @@ module C0
       self
     end
 
-    # SUB: the element before the next separator or opener is superseded
-    # by the element after it, at that code's grain (`old␚␟new`).
+    # SUB: the element after the next separator is subordinate to the one
+    # before it: before GS a subsection (`␚␝s`), before US a sub-unit
+    # (`old␚␟new`).
     def sub : self
       @io.write_byte(SUB)
       self
@@ -224,8 +227,7 @@ module C0
     end
 
     def group(name : String, headers : Indexable(String)? = nil, depth : Int32 = 1) : self
-      (depth - 1).times { gs }
-      gs(name)
+      gs(name, depth: depth)
       header(headers) if headers
       self
     end
@@ -368,11 +370,13 @@ module C0
       enq { yield }
     end
 
-    # A superseded unit: `old` superseded by `new`, written `old␚␟new`.
-    def supersede(old_value : String | Bytes, new_value : String | Bytes) : self
-      field(old_value)
-      sub
-      field(new_value)
+    # A sub-unit of the unit just written: `depth` SUB, US and the value
+    # (`␞a␚␟b`; `depth: 2` is a sub-unit of the sub-unit before).
+    def sub_unit(value : String | Bytes | Nil = nil, depth : Int32 = 1) : self
+      depth.times { @io.write_byte(SUB) }
+      @io.write_byte(US)
+      write_value(value) if value
+      self
     end
 
     # ---- comments ----------------------------------------------------------

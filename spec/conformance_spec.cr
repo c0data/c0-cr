@@ -24,12 +24,12 @@ private def scalar?(f : ::JSON::Any) : Bool
   !f.as_s?.nil? || (f.as_h? && f["hex"]?) ? true : false
 end
 
-# Flatten a group list with "sections" into (depth, group) pairs. A
-# section with a null name is a skipped depth: no group stands there.
+# Flatten a group list with "sections" (SUB GS subsections) into (depth,
+# group) pairs.
 private def flat_groups(groups : Array(::JSON::Any), depth : Int32 = 1) : Array({Int32, ::JSON::Any})
   out = Array({Int32, ::JSON::Any}).new
   groups.each do |g|
-    out << {depth, g} unless g["name"].as_s?.nil?
+    out << {depth, g}
     if secs = g["sections"]?
       out.concat(flat_groups(secs.as_a, depth + 1))
     end
@@ -37,9 +37,29 @@ private def flat_groups(groups : Array(::JSON::Any), depth : Int32 = 1) : Array(
   out
 end
 
+# A unit with sub-units: {"value": v, "subs": [...]}, nested.
+private def check_unit(u : C0::Unit, f : ::JSON::Any) : Nil
+  if scalar?(f)
+    u.value.should eq(scalar_bytes(f))
+    u.subs.should be_empty
+  elsif subs = f["subs"]?
+    check_unit(C0::Unit.new(u.raw), f["value"])
+    u.subs.size.should eq(subs.as_a.size)
+    subs.as_a.each_with_index { |sf, k| check_unit(u.subs[k], sf) }
+  elsif lvl = f["level"]?
+    raw = C0.trim(u.raw)
+    check_body(C0::Body.new(raw, 1, C0::Scan.level(raw, 0) - 1, level: true), lvl)
+  else
+    raise "unknown sub-unit form #{f}"
+  end
+end
+
 private def check_value(rec : C0::Record, i : Int32, f : ::JSON::Any) : Nil
   if scalar?(f)
     rec.value(i).should eq(scalar_bytes(f))
+    rec.unit(i).subs.should be_empty
+  elsif f["subs"]?
+    check_unit(rec.unit(i), f)
   elsif lvl = f["level"]?
     check_body(rec.level(i), lvl)
   elsif ref = f["ref"]?
@@ -67,7 +87,11 @@ private def check_record(rec : C0::Record, r : ::JSON::Any) : Nil
     rec.keys.map { |k| String.new(k) }.should eq(pairs.map { |p| p[0].as_s })
     got = rec.pairs
     pairs.each_with_index do |p, j|
-      got[j][1].should eq(scalar_bytes(p[1]))
+      if scalar?(p[1])
+        got[j][1].should eq(scalar_bytes(p[1]))
+      else
+        check_unit(rec.unit(p[0].as_s).not_nil!, p[1])
+      end
     end
   end
 end

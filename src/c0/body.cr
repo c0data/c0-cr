@@ -1,9 +1,8 @@
 module C0
   # Zero-copy navigator for a document body: the bytes between a heading
   # and EOT, or the inside of a nested level. The structure (files, groups,
-  # header rows, records) is built once by the Parser with dead and
-  # superseded elements dropped; everything it returns is a slice into
-  # the original buffer.
+  # header rows, records) is built once by the Parser with dead elements
+  # dropped; everything it returns is a slice into the original buffer.
   #
   # Records before the first GS of a file form an unnamed group; records
   # and groups before the first FS form an unnamed file.
@@ -126,7 +125,7 @@ module C0
     end
   end
 
-  # A group: its depth (GS count; 0 for the unnamed leading group), name,
+  # A group: its depth (one plus its SUB prefix; 0 for the unnamed leading group), name,
   # optional header row and records.
   class Group
     @buf : Bytes
@@ -189,13 +188,14 @@ module C0
 
   alias Table = Group
 
-  # One unit of a positional record as written: its raw bytes and whether
-  # the unit after it supersedes it (`old␚␟new`).
+  # One unit as written: its raw value bytes and its sub-units (`␞a␟b␚␟c`:
+  # `b` holds the sub-unit `c`; DESIGN.md, Subordinates), each a Unit with
+  # sub-units of its own.
   struct Unit
     getter raw : Bytes
-    getter? superseded : Bool
+    getter subs : Array(Unit)
 
-    def initialize(@raw : Bytes, @superseded : Bool)
+    def initialize(@raw : Bytes, @subs : Array(Unit) = Array(Unit).new)
     end
 
     # Logical value.
@@ -204,9 +204,9 @@ module C0
     end
   end
 
-  # A record: positional or keyed. Zero-copy accessors. The positional and
-  # keyed accessors report the record's **result**: a superseded unit is
-  # not among them; `units` lists every unit as written.
+  # A record: positional or keyed. Zero-copy accessors. A sub-unit is not a
+  # unit of the record: `fields`, `values` and `pairs` list the units,
+  # `unit(n)` and `unit(key)` give a unit with its sub-units.
   struct Record
     @buf : Bytes
     @start : Int32
@@ -230,10 +230,10 @@ module C0
     def keyed? : Bool
       ptr = @buf.to_unsafe
       p = Scan.layout(@buf, @start, @end)
-      while p < @end && (ptr[p] == BEL || ptr[p] == SUB)
+      while p < @end && ptr[p] == BEL
         p2 = Scan.layout(@buf, p + 1, @end)
         return true if p2 < @end && ptr[p2] == SOH
-        break if p2 >= @end || ptr[p] == SUB || (ptr[p2] < 0x20_u8 && ptr[p2] != STX)
+        break if p2 >= @end || (ptr[p2] < 0x20_u8 && ptr[p2] != STX)
         p = Scan.layout(@buf, Scan.comment(@buf, p, @end), @end)
       end
       p < @end && ptr[p] == SOH
@@ -261,11 +261,36 @@ module C0
       out
     end
 
-    # Every unit as written, superseded ones included.
+    # Every unit with its sub-units.
     def units : Array(Unit)
       out = Array(Unit).new
-      each_written_unit { |s, e, sup| out << Unit.new(@buf[s...e], sup) }
+      each_unit_span { |s, e, subs| out << Unit.new(@buf[s...e], Record.sub_tree(@buf, subs)) }
       out
+    end
+
+    # Unit n with its sub-units.
+    def unit(n : Int32) : Unit
+      i = 0
+      each_unit_span do |s, e, subs|
+        return Unit.new(@buf[s...e], Record.sub_tree(@buf, subs)) if i == n
+        i += 1
+      end
+      raise IndexError.new("unit #{n} of #{i}")
+    end
+
+    # Build the sub-unit tree from (depth, start, end) spans in written
+    # order; the parser has refused skipped depths.
+    protected def self.sub_tree(buf : Bytes, spans : Array({Int32, Int32, Int32})) : Array(Unit)
+      top = Array(Unit).new
+      parents = [top]
+      spans.each do |(d, s, e)|
+        d = parents.size if d > parents.size
+        u = Unit.new(buf[s...e], Array(Unit).new)
+        parents[d - 1] << u
+        parents.truncate(0, d)
+        parents << u.subs
+      end
+      top
     end
 
     # Logical value of unit n.
@@ -303,22 +328,31 @@ module C0
     # Keys in written order.
     def keys : Array(Bytes)
       out = Array(Bytes).new
-      each_keyed_range { |k, ks, ke, vs, ve| out << k }
+      each_keyed_range { |k, ks, ke, vs, ve, subs| out << k }
       out
     end
 
     # Pairs in written order (key, logical value).
     def pairs : Array({Bytes, Bytes})
       out = Array({Bytes, Bytes}).new
-      each_keyed_range { |k, ks, ke, vs, ve| out << {k, C0.value(@buf[vs...ve])} }
+      each_keyed_range { |k, ks, ke, vs, ve, subs| out << {k, C0.value(@buf[vs...ve])} }
       out
     end
 
     # Raw unit for a key (last wins), or nil.
     def field(key : String) : Bytes?
       found = nil
-      each_keyed_range do |k, ks, ke, vs, ve|
+      each_keyed_range do |k, ks, ke, vs, ve, subs|
         found = @buf[vs...ve] if k == key.to_slice
+      end
+      found
+    end
+
+    # The unit under a key with its sub-units (last wins), or nil.
+    def unit(key : String) : Unit?
+      found = nil
+      each_keyed_range do |k, ks, ke, vs, ve, subs|
+        found = Unit.new(@buf[vs...ve], Record.sub_tree(@buf, subs)) if k == key.to_slice
       end
       found
     end
@@ -345,43 +379,55 @@ module C0
       Body.new(t, 1, stop - 1, level: true)
     end
 
-    # Yields (start, end, superseded) for each positional unit as written.
-    private def each_written_unit(& : Int32, Int32, Bool ->) : Nil
+    # Skip the sub-units after a value ending at pos, collecting their
+    # (depth, start, end) spans. Returns the position after them.
+    private def sub_spans(pos : Int32, spans : Array({Int32, Int32, Int32})) : Int32
+      ptr = @buf.to_unsafe
+      loop do
+        return pos unless pos < @end && ptr[pos] == SUB
+        q = pos
+        run = 0
+        while q < @end && ptr[q] == SUB
+          run += 1
+          q = Scan.layout(@buf, q + 1, @end)
+        end
+        return pos unless q < @end && ptr[q] == US
+        ss = q + 1
+        se = Scan.unit(@buf, ss, @end)
+        spans << {run, ss, se}
+        pos = se
+      end
+    end
+
+    # Yields (start, end, sub-unit spans) for each positional unit.
+    private def each_unit_span(& : Int32, Int32, Array({Int32, Int32, Int32}) ->) : Nil
       return if keyed?
       ptr = @buf.to_unsafe
       pos = Scan.layout(@buf, @start, @end)
       unit_start = @start
       loop do
         pos = Scan.unit(@buf, pos, @end)
-        superseded = false
-        nxt = pos
-        if pos < @end && ptr[pos] == SUB
-          p2 = Scan.layout(@buf, pos + 1, @end)
-          if p2 < @end && ptr[p2] == US
-            superseded = true
-            nxt = p2
-          end
-        end
-        yield unit_start, pos, superseded
+        spans = Array({Int32, Int32, Int32}).new
+        nxt = sub_spans(pos, spans)
+        yield unit_start, pos, spans
         break unless nxt < @end && ptr[nxt] == US
         pos = nxt + 1
         unit_start = pos
       end
     end
 
-    # Yields (index, start, end) for each positional unit of the result.
+    # Yields (index, start, end) for each positional unit.
     private def each_unit_range(& : Int32, Int32, Int32 ->) : Nil
       idx = 0
-      each_written_unit do |s, e, sup|
-        next if sup
+      each_unit_span do |s, e, subs|
         yield idx, s, e
         idx += 1
       end
     end
 
-    # Yields (key, key_start, key_end, value_start, value_end) per keyed
-    # unit of the result.
-    private def each_keyed_range(& : Bytes, Int32, Int32, Int32, Int32 ->) : Nil
+    # Yields (key, key_start, key_end, value_start, value_end, sub-unit
+    # spans) per keyed unit.
+    private def each_keyed_range(& : Bytes, Int32, Int32, Int32, Int32, Array({Int32, Int32, Int32}) ->) : Nil
       ptr = @buf.to_unsafe
       pos = Scan.layout(@buf, @start, @end)
       while pos < @end
@@ -392,19 +438,12 @@ module C0
           raise SyntaxError.new("key without a value (no US)", ke) unless ke < @end && ptr[ke] == US
           vs = ke + 1
           ve = Scan.unit(@buf, vs, @end)
-          superseded = false
-          pos = ve
-          if ve < @end && ptr[ve] == SUB
-            p2 = Scan.layout(@buf, ve + 1, @end)
-            if p2 < @end && ptr[p2] == SOH
-              superseded = true
-              pos = p2
-            end
-          end
-          yield C0.trim(@buf[ks...ke]), ks, ke, vs, ve unless superseded
+          spans = Array({Int32, Int32, Int32}).new
+          pos = sub_spans(ve, spans)
+          yield C0.trim(@buf[ks...ke]), ks, ke, vs, ve, spans
         elsif b == BEL
           pos = Scan.comment(@buf, pos, @end)
-        elsif b == SUB || C0.layout?(b)
+        elsif C0.layout?(b)
           pos += 1
         else
           return

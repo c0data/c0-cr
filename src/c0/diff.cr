@@ -1,8 +1,8 @@
 module C0
   # C0DIFF: atomic multi-file edits with anchored patterns (DIFF.md). A
   # diff is an ordinary document of `shape` `diff`: files of records, each
-  # record a pattern of units, with `old␚␟new` (supersession at the unit
-  # grain) as the substitution.
+  # record a pattern of units, with `old␚␟new` (the sub-unit of `old`) as
+  # the substitution.
   #
   #   diff = C0::Diff.build do |d|
   #     d.file("greeting.txt") do
@@ -33,14 +33,14 @@ module C0
       def initialize(@units : Array(Unit))
       end
 
-      # What the file must hold, once: anchors and superseded units.
+      # What the file must hold, once: anchors and olds.
       def search : Bytes
         io = IO::Memory.new
         @units.each { |u| io.write(u.old) }
         io.to_slice
       end
 
-      # What it will hold: superseding units in place of superseded ones.
+      # What it will hold: each sub-unit in place of the unit that holds it.
       def replacement : Bytes
         io = IO::Memory.new
         @units.each { |u| io.write(u.new || u.old) }
@@ -72,9 +72,6 @@ module C0
         raise Error.new("heading declares shape '#{shape}', not diff")
       end
       raise Error.new("a dead element in a diff: a hunk is kept without applying by writing it in a note") if parser.dead_elements > 0
-      parser.supersessions.each do |c|
-        raise Error.new("supersession at a grain other than the unit") unless c == US
-      end
       files = Array(FileEdit).new
       doc.body.files.each do |f|
         if f.leading?
@@ -98,24 +95,28 @@ module C0
     private def self.pattern_of(rec : Record) : Pattern
       raise Error.new("a keyed unit in a diff record") if rec.keyed?
       units = Array(Unit).new
-      pending = nil.as(Bytes?)
       rec.units.each do |u|
-        raw = u.raw
-        raise Error.new("a nested level in a diff record") if C0.level?(raw)
-        raise Error.new("a reference in a diff record") if C0.reference?(raw)
-        v = C0.value(raw)
-        if u.superseded?
-          raise Error.new("a chained supersession: its search text would hold what the file never held") if pending
-          pending = v
-        elsif old = pending
-          raise Error.new("a substitution of nothing by nothing") if old.empty? && v.empty?
-          units << Unit.new(old, v)
-          pending = nil
-        else
+        v = diff_value(u.raw)
+        case u.subs.size
+        when 0
           units << Unit.new(v, nil)
+        when 1
+          sub = u.subs[0]
+          raise Error.new("a sub-unit of a sub-unit in a diff record") unless sub.subs.empty?
+          nv = diff_value(sub.raw)
+          raise Error.new("a substitution of nothing by nothing") if v.empty? && nv.empty?
+          units << Unit.new(v, nv)
+        else
+          raise Error.new("two sub-units on one unit: one old has one new")
         end
       end
       Pattern.new(units)
+    end
+
+    private def self.diff_value(raw : Bytes) : Bytes
+      raise Error.new("a nested level in a diff record") if C0.level?(raw)
+      raise Error.new("a reference in a diff record") if C0.reference?(raw)
+      C0.value(raw)
     end
 
     # Apply a diff to in-memory files. Validates everything first; raises
