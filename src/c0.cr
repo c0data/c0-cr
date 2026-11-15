@@ -222,15 +222,18 @@ module C0
           keyed_unit_end(buf, pos + 1, stop)
         end
       elsif byte == GS
+        # one group line: GS repetition is an empty group, not depth
+        plain(buf, layout(buf, pos + 1, stop), stop)
+      elsif byte == SUB
+        # a dead group line with its depth prefix
         p2 = pos
-        while p2 < stop && (ptr[p2] == GS || C0.layout?(ptr[p2]))
-          p2 += 1
+        while p2 < stop && ptr[p2] == SUB
+          p2 = layout(buf, p2 + 1, stop)
         end
-        plain(buf, p2, stop)
+        raise SyntaxError.new("BEL before a code that is not an element", pos) unless p2 < stop && ptr[p2] == GS
+        plain(buf, layout(buf, p2 + 1, stop), stop)
       elsif byte == FS
         plain(buf, pos + 1, stop)
-      elsif byte == RS
-        record_end(buf, pos + 1, stop)
       else
         raise SyntaxError.new("BEL before a code that is not an element", pos)
       end
