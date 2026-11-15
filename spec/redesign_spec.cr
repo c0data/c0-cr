@@ -150,6 +150,8 @@ describe "Subordinates (SUB)" do
     expect_raises(C0::SyntaxError) { C0.validate(C0::Pretty.parse("␝g␚␞x")) }
     expect_raises(C0::SyntaxError) { C0.validate(C0::Pretty.parse("␝a␚␚␝c")) }
     expect_raises(C0::SyntaxError) { C0.validate(C0::Pretty.parse("␞a␚␚␟c")) }
+    expect_raises(C0::SyntaxError) { C0.validate(C0::Pretty.parse("␞a␟␅␐␝g␞3␚␟x␘")) }
+    expect_raises(C0::SyntaxError) { C0.validate(C0::Pretty.parse("␞a␟␅␐␝g␞␁k␟␚␟x␘")) }
     C0::Builder.build { |b| b.gs("a").gs("s", depth: 2).rs("x").sub_unit("y") }.should eq(C0::Pretty.parse("␝a␚␝s␞x␚␟y"))
   end
 

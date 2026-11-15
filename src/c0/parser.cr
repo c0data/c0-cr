@@ -660,10 +660,12 @@ module C0
       if rec.keyed?
         pairs = rec.pairs
         raise SyntaxError.new("a keyed record in a pattern holds one keyed unit", at) unless pairs.size == 1
+        raise SyntaxError.new("a sub-unit is not a step of a pattern", at) unless rec.unit(String.new(pairs[0][0])).not_nil!.subs.empty?
         raise SyntaxError.new("a keyed unit in a pattern has no value", at) unless pairs[0][1].size == 0
         raise SyntaxError.new("a step of a pattern is a name", at) unless pairs[0][0].size > 0 && C0.name?(pairs[0][0])
         return
       end
+      raise SyntaxError.new("a sub-unit is not a step of a pattern", at) if rec.units.any? { |u| !u.subs.empty? }
       units = rec.fields
       raise SyntaxError.new("a pattern record holds at most a record id, a field name and a level", at) if units.size > 3
       units.each_with_index do |raw, i|
